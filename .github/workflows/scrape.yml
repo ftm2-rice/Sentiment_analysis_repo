@@ -1,0 +1,50 @@
+name: Scrape data-center tweets
+
+on:
+  schedule:
+    # 12:10 UTC every day = 09:10 Buenos Aires / 07:10 Chicago
+    - cron: "10 12 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "backfill (one-off ~3k) or daily (~100)"
+        type: choice
+        options: [daily, backfill]
+        default: daily
+      dry_run:
+        description: "fetch only, don't write to Supabase"
+        type: boolean
+        default: false
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TWITTERAPI_IO_KEY: ${{ secrets.TWITTERAPI_IO_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run scraper
+        run: |
+          MODE="${{ github.event.inputs.mode || 'daily' }}"
+          DRY=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then DRY="--dry-run"; fi
+          python scrape.py --mode "$MODE" $DRY --csv "out/${MODE}_$(date -u +%F).csv"
+      - name: Keep a CSV copy of this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tweets-${{ github.run_id }}
+          path: out/*.csv
+          retention-days: 30
