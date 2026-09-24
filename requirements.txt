@@ -1,0 +1,2 @@
+requests>=2.32
+supabase>=2.10
