@@ -161,3 +161,4 @@ MODES = {"backfill": BACKFILL, "daily": DAILY, "test": TEST, "bonus": BONUS}
 
 SUPABASE_TABLE = "dc_tweets"
 SUPABASE_RUNS_TABLE = "dc_runs"
+SUPABASE_COVERAGE_TABLE = "dc_coverage"
