@@ -129,6 +129,29 @@ def author_is_verified(a: dict) -> bool:
     return bool(a.get("isBlueVerified")) or bool(a.get("verifiedType"))
 
 
+_TOPIC = re.compile(C.TOPIC_RE, re.I)
+_AR = re.compile(C.ARGENTINA_RE, re.I)
+
+
+def is_on_topic(text: str) -> bool:
+    """Data-center term AND Argentina term; close together if the text is long."""
+    if not text:
+        return False
+    t = [m.start() for m in _TOPIC.finditer(text)]
+    a = [m.start() for m in _AR.finditer(text)]
+    if not t or not a:
+        return False
+    if len(text) <= C.LONG_TEXT_CHARS:
+        return True
+    return any(abs(i - j) <= C.PROXIMITY_CHARS for i in t for j in a)
+
+
+def tweet_topic_text(t: dict) -> str:
+    """Own text plus quoted tweet's text (a quote of an on-topic post counts)."""
+    q = t.get("quoted_tweet") or {}
+    return f"{t.get('text') or ''}\n{q.get('text') or ''}"
+
+
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
@@ -266,9 +289,9 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
 
     seen: dict[str, dict] = {}       # tweet_id -> raw
     seen_query: dict[str, str] = {}
-    dropped = {"retweet": 0, "bot": 0, "short": 0, "known": 0}
+    dropped = {"retweet": 0, "bot": 0, "short": 0, "offtopic": 0, "known": 0}
 
-    def consider(t: dict, query: str) -> bool:
+    def consider(t: dict, query: str, thread_reply: bool = False) -> bool:
         tid = str(t.get("id") or "")
         if not tid or tid in seen:
             return False
@@ -284,6 +307,10 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
             return False
         if len(visible_text(t)) < C.BOT_RULES["min_text_chars"]:
             dropped["short"] += 1
+            return False
+        # replies inside an on-topic thread may not repeat the keywords; everything else must
+        if not thread_reply and not is_on_topic(tweet_topic_text(t)):
+            dropped["offtopic"] += 1
             return False
         seen[tid] = t
         seen_query[tid] = query
@@ -313,7 +340,8 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
                         (author_is_verified(a)
                          and (a.get("followers") or 0) >= C.AUTO_OUTLET_MIN_FOLLOWERS)) \
                             and (t.get("replyCount") or 0) >= C.AUTO_OUTLET_MIN_REPLIES \
-                            and not t.get("isReply"):
+                            and not t.get("isReply") \
+                            and is_on_topic(tweet_topic_text(t)):
                         news_posts[str(t["id"])] = t
                         outlets.add(un)         # auto-discovered outlet
                     consider(t, full)
@@ -337,7 +365,8 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
         cid = t.get("conversationId") or t["id"]
         un = (t.get("author") or {}).get("userName") or ""
         q = f"conversation_id:{cid} -from:{un} -filter:nativeretweets"
-        got = sum(1 for r in client.search(q, "Latest", P["max_thread_pages"]) if consider(r, q))
+        got = sum(1 for r in client.search(q, "Latest", P["max_thread_pages"])
+                  if consider(r, q, thread_reply=True))
         print(f"  thread @{un} ({t.get('replyCount')} replies) → {got} kept")
 
     # ---- Classify, trim, write --------------------------------------------
