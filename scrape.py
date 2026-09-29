@@ -249,6 +249,35 @@ def upsert(sb, rows: list[dict]) -> int:
     return n
 
 
+def load_coverage(sb) -> set[tuple]:
+    """Cells (window_start_iso, window_end_iso, query_idx, query_type) already fetched."""
+    if sb is None:
+        return set()
+    try:
+        res = sb.table(C.SUPABASE_COVERAGE_TABLE).select("window_start,window_end,query_idx,query_type").execute()
+    except Exception as e:  # table missing → behave as before
+        print(f"  ! coverage table unavailable ({str(e)[:80]}); every window will be fetched")
+        return set()
+    out = set()
+    for r in res.data or []:
+        ws = parse_dt(r["window_start"]); we = parse_dt(r["window_end"])
+        out.add((int(ws.timestamp()), int(we.timestamp()), int(r["query_idx"]), r["query_type"]))
+    return out
+
+
+def mark_coverage(sb, since: int, until: int, qi: int, qt: str, fetched: int):
+    if sb is None:
+        return
+    try:
+        sb.table(C.SUPABASE_COVERAGE_TABLE).upsert({
+            "window_start": datetime.fromtimestamp(since, timezone.utc).isoformat(),
+            "window_end": datetime.fromtimestamp(until, timezone.utc).isoformat(),
+            "query_idx": qi, "query_type": qt, "fetched": fetched,
+        }).execute()
+    except Exception as e:
+        print(f"  ! could not record coverage: {str(e)[:80]}")
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -274,9 +303,12 @@ def time_windows(mode: str) -> list[tuple[int, int]]:
     if "lookback_hours" in C.MODES[mode]:
         start = now - timedelta(hours=C.MODES[mode]["lookback_hours"])
         return [(int(start.timestamp()), int(now.timestamp()))]
-    wins, end = [], now
-    for _ in range(C.BACKFILL["months_back"]):
-        start = end - timedelta(days=30)
+    # calendar-month windows so they're identical from one run to the next
+    wins = []
+    end = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    wins.append((int(end.timestamp()), int(now.timestamp())))          # current partial month
+    for _ in range(C.MODES[mode]["months_back"]):
+        start = (end - timedelta(days=1)).replace(day=1)
         wins.append((int(start.timestamp()), int(end.timestamp())))
         end = start
     return wins
@@ -340,14 +372,20 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     windows = time_windows(mode)
     max_pages = P.get("max_pages_per_query_window", P.get("max_pages_per_query", 3))
     news_posts: dict[str, dict] = {}   # candidate threads to expand
+    sweep_mode = "lookback_hours" not in P          # backfill / bonus: remember coverage
+    covered = load_coverage(sb) if sweep_mode else set()
+    skipped = 0
 
     for (since, until) in windows:
         if client.over_cap() or len(seen) >= P["target_new_tweets"] * 1.5:
             break
-        for q in queries:
+        for qi, q in enumerate(queries):
             for qt in ("Latest", "Top"):
                 if client.over_cap():
                     break
+                if sweep_mode and (since, until, qi, qt) in covered:
+                    skipped += 1
+                    continue
                 full = f"{q} since_time:{since} until_time:{until}"
                 got = 0
                 for t in client.search(full, qt, max_pages):
@@ -364,6 +402,9 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
                         news_posts[str(t["id"])] = t
                         outlets.add(un)         # auto-discovered outlet
                     consider(t, full)
+                # the current (partial) month is never marked done: new tweets keep arriving
+                if sweep_mode and not client.exhausted and until != windows[0][1]:
+                    mark_coverage(sb, since, until, qi, qt, got)
                 print(f"[{mode}] {qt:6} {datetime.fromtimestamp(since, timezone.utc):%Y-%m-%d} "
                       f"→ {got:3} fetched | {len(seen)} kept | {client.tweets_fetched} total")
         if "lookback_hours" in P:
@@ -404,6 +445,8 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     counts = {}
     for r in rows:
         counts[r["source_type"]] = counts.get(r["source_type"], 0) + 1
+    if sweep_mode:
+        print(f"coverage: skipped {skipped} already-fetched cells")
     print(f"\nkept {len(rows)} | by source: {counts} | dropped: {dropped}")
     print(f"API pages: {client.pages} | tweets fetched: {client.tweets_fetched} "
           f"| est. cost ${client.est_cost():.3f}")
