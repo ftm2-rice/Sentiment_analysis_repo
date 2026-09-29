@@ -131,17 +131,21 @@ def author_is_verified(a: dict) -> bool:
 
 _TOPIC = re.compile(C.TOPIC_RE, re.I)
 _AR = re.compile(C.ARGENTINA_RE, re.I)
+_AR_FALSE = re.compile(C.ARGENTINA_FALSE_RE, re.I)
 
 
-def is_on_topic(text: str) -> bool:
+def is_on_topic(text: str, lenient: bool = False) -> bool:
     """Data-center term AND Argentina term; close together if the text is long."""
     if not text:
         return False
     t = [m.start() for m in _TOPIC.finditer(text)]
-    a = [m.start() for m in _AR.finditer(text)]
+    # drop Argentina mentions that sit inside a "false" phrase (than Argentina, Argentina beef…)
+    false_spans = [(m.start(), m.end()) for m in _AR_FALSE.finditer(text)]
+    a = [m.start() for m in _AR.finditer(text)
+         if not any(s0 <= m.start() < s1 for s0, s1 in false_spans)]
     if not t or not a:
         return False
-    if len(text) <= C.LONG_TEXT_CHARS:
+    if lenient or len(text) <= C.LONG_TEXT_CHARS:
         return True
     return any(abs(i - j) <= C.PROXIMITY_CHARS for i in t for j in a)
 
@@ -289,7 +293,8 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
 
     seen: dict[str, dict] = {}       # tweet_id -> raw
     seen_query: dict[str, str] = {}
-    dropped = {"retweet": 0, "bot": 0, "short": 0, "offtopic": 0, "known": 0}
+    seen_text: set[str] = set()      # (author, normalized text) → catches copy-paste reposts
+    dropped = {"retweet": 0, "bot": 0, "short": 0, "offtopic": 0, "dup_text": 0, "known": 0}
 
     def consider(t: dict, query: str, thread_reply: bool = False) -> bool:
         tid = str(t.get("id") or "")
@@ -309,9 +314,15 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
             dropped["short"] += 1
             return False
         # replies inside an on-topic thread may not repeat the keywords; everything else must
-        if not thread_reply and not is_on_topic(tweet_topic_text(t)):
+        if not thread_reply and not is_on_topic(tweet_topic_text(t),
+                                                lenient=(a.get("userName") or "").lower() in outlets):
             dropped["offtopic"] += 1
             return False
+        key = ((a.get("userName") or "").lower(), re.sub(r"\W+", " ", visible_text(t).lower())[:200])
+        if key in seen_text:
+            dropped["dup_text"] += 1
+            return False
+        seen_text.add(key)
         seen[tid] = t
         seen_query[tid] = query
         return True
