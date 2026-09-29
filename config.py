@@ -145,7 +145,19 @@ TEST = {
     "hard_cap_tweets_fetched": 100,
 }
 
-MODES = {"backfill": BACKFILL, "daily": DAILY, "test": TEST}
+# Squeeze the most out of a 10k-credit bonus account: month-by-month sweep like
+# backfill, but stops at ~640 tweets fetched (≈ 9,600 credits). Threads kept small
+# so the budget goes to breadth.
+BONUS = {
+    "months_back": 12,
+    "target_new_tweets": 10_000,
+    "max_pages_per_query_window": 1,
+    "max_thread_pages": 1,
+    "max_threads": 6,
+    "hard_cap_tweets_fetched": 640,
+}
+
+MODES = {"backfill": BACKFILL, "daily": DAILY, "test": TEST, "bonus": BONUS}
 
 SUPABASE_TABLE = "dc_tweets"
 SUPABASE_RUNS_TABLE = "dc_runs"
