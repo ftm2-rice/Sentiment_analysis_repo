@@ -107,5 +107,17 @@ DAILY = {
     "hard_cap_tweets_fetched": 1000,    # ≈ $0.15 worst case
 }
 
+# Smoke test: validates the whole pipeline for ~1,500 credits (≈ $0.015)
+TEST = {
+    "lookback_hours": 24 * 14,
+    "target_new_tweets": 40,
+    "max_pages_per_query": 1,
+    "max_thread_pages": 1,
+    "max_threads": 2,
+    "hard_cap_tweets_fetched": 100,
+}
+
+MODES = {"backfill": BACKFILL, "daily": DAILY, "test": TEST}
+
 SUPABASE_TABLE = "dc_tweets"
 SUPABASE_RUNS_TABLE = "dc_runs"
