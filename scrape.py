@@ -43,9 +43,10 @@ class Client:
         self.pages = 0
         self.tweets_fetched = 0
         self.hard_cap = hard_cap
+        self.exhausted = False          # set when the API says no credits left (402)
 
     def over_cap(self) -> bool:
-        return self.tweets_fetched >= self.hard_cap
+        return self.exhausted or self.tweets_fetched >= self.hard_cap
 
     def search(self, query: str, query_type: str = "Latest", max_pages: int = 3):
         """Yield raw tweet dicts, following the cursor."""
@@ -60,6 +61,10 @@ class Client:
                     time.sleep(2 ** attempt)
                     continue
                 break
+            if r.status_code == 402 or (r.status_code in (401, 403) and "credit" in r.text.lower()):
+                print(f"  ! {r.status_code} — account out of credits, stopping all requests")
+                self.exhausted = True
+                return
             if r.status_code != 200:
                 print(f"  ! {r.status_code} on {query[:60]}…: {r.text[:200]}")
                 return
@@ -266,7 +271,7 @@ def build_queries() -> list[str]:
 
 def time_windows(mode: str) -> list[tuple[int, int]]:
     now = datetime.now(timezone.utc)
-    if mode != "backfill":
+    if "lookback_hours" in C.MODES[mode]:
         start = now - timedelta(hours=C.MODES[mode]["lookback_hours"])
         return [(int(start.timestamp()), int(now.timestamp()))]
     wins, end = [], now
@@ -361,7 +366,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
                     consider(t, full)
                 print(f"[{mode}] {qt:6} {datetime.fromtimestamp(since, timezone.utc):%Y-%m-%d} "
                       f"→ {got:3} fetched | {len(seen)} kept | {client.tweets_fetched} total")
-        if mode != "backfill":
+        if "lookback_hours" in P:
             break
 
     # ---- Pass 2: expand discussion under news posts -----------------------
@@ -394,7 +399,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
         else:
             rows.append(to_row(t, *classify(t, outlets), seen_query[tid], mode))
     rows.sort(key=lambda r: r["created_at"], reverse=True)
-    rows = rows[:P["target_new_tweets"]] if mode != "backfill" else rows
+    rows = rows[:P["target_new_tweets"]]
 
     counts = {}
     for r in rows:
