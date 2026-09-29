@@ -293,10 +293,11 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
 
     seen: dict[str, dict] = {}       # tweet_id -> raw
     seen_query: dict[str, str] = {}
-    seen_text: set[str] = set()      # (author, normalized text) → catches copy-paste reposts
+    seen_text: set[str] = set()      # normalized text → catches copy-paste reposts
+    seen_thread: dict[str, str] = {}  # tweet_id -> outlet handle, for tweets found via thread expansion
     dropped = {"retweet": 0, "bot": 0, "short": 0, "offtopic": 0, "dup_text": 0, "known": 0}
 
-    def consider(t: dict, query: str, thread_reply: bool = False) -> bool:
+    def consider(t: dict, query: str, thread_reply: bool = False, thread_of: str | None = None) -> bool:
         tid = str(t.get("id") or "")
         if not tid or tid in seen:
             return False
@@ -318,11 +319,13 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
                                                 lenient=(a.get("userName") or "").lower() in outlets):
             dropped["offtopic"] += 1
             return False
-        key = ((a.get("userName") or "").lower(), re.sub(r"\W+", " ", visible_text(t).lower())[:200])
+        key = re.sub(r"\W+", " ", visible_text(t).lower())[:200]   # text-only: reposts by other accounts collapse
         if key in seen_text:
             dropped["dup_text"] += 1
             return False
         seen_text.add(key)
+        if thread_of:
+            seen_thread[tid] = thread_of
         seen[tid] = t
         seen_query[tid] = query
         return True
@@ -377,11 +380,19 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
         un = (t.get("author") or {}).get("userName") or ""
         q = f"conversation_id:{cid} -from:{un} -filter:nativeretweets"
         got = sum(1 for r in client.search(q, "Latest", P["max_thread_pages"])
-                  if consider(r, q, thread_reply=True))
+                  if consider(r, q, thread_reply=True, thread_of=un.lower()))
         print(f"  thread @{un} ({t.get('replyCount')} replies) → {got} kept")
 
     # ---- Classify, trim, write --------------------------------------------
-    rows = [to_row(t, *classify(t, outlets), seen_query[tid], mode) for tid, t in seen.items()]
+    rows = []
+    for tid, t in seen.items():
+        if tid in seen_thread:
+            st, oh = classify(t, outlets)
+            if st not in ("news_reply", "news_quote"):
+                st, oh = "news_thread", seen_thread[tid]   # reply inside an outlet's thread, addressed to another user
+            rows.append(to_row(t, st, oh, seen_query[tid], mode))
+        else:
+            rows.append(to_row(t, *classify(t, outlets), seen_query[tid], mode))
     rows.sort(key=lambda r: r["created_at"], reverse=True)
     rows = rows[:P["target_new_tweets"]] if mode != "backfill" else rows
 
