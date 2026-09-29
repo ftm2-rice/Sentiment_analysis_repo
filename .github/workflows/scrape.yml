@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "test (≤100 tweets, free credits) / daily (~100 new) / backfill (one-off ~3k)"
+        description: "test (≤100 fetched) / bonus (≤640 fetched, fits 10k free credits) / daily (~100 new) / backfill (~3k, needs recharge)"
         type: choice
-        options: [test, daily, backfill]
+        options: [test, bonus, daily, backfill]
         default: daily
       dry_run:
         description: "fetch only, don't write to Supabase"
