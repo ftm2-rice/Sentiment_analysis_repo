@@ -42,7 +42,7 @@ jobs:
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then DRY="--dry-run"; fi
           python scrape.py --mode "$MODE" $DRY --csv "out/${MODE}_$(date -u +%F).csv"
       - name: Keep a CSV copy of this run
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: tweets-${{ github.run_id }}
