@@ -38,7 +38,14 @@ ARGENTINA_RE = (
     r"san\s+juan|salta|jujuy|catamarca|tucum[aá]n|rosario|la\s+plata"
 )
 LONG_TEXT_CHARS = 600      # above this, require proximity
-PROXIMITY_CHARS = 300
+PROXIMITY_CHARS = 200   # outlet accounts (OUTLETS) bypass this rule
+
+# Phrases where "Argentina" is only a comparison unit or a commodity, not the place
+# the data center is in. A tweet whose ONLY Argentina mention is one of these is dropped.
+ARGENTINA_FALSE_RE = (
+    r"than\s+argentina|beef\s+from\s+argentina|argentin\w*\s+beef|carne\s+argentina|"
+    r"argentina\s+(?:vs|v\.?)\s|messi|mundial|world\s+cup"
+)
 
 # Company-driven news hooks. Still gated by CORE_TERMS, so strictly data-center.
 COMPANY_ANCHORS = (
@@ -79,7 +86,7 @@ OUTLETS = [
     "LaGacetaTucuman", "diariouno", "losandesdiario", "lanuevaweb",
     # (international wires removed on purpose: to:Reuters pulled US/China news)
     # official / corporate accounts that drive the conversation
-    "JMilei", "OPRArgentina", "MinEconomia_Ar", "CasaRosada", "ARCA_Argentina",
+    "JMilei", "OPRArgentina", "MinEconomia_Ar", "CasaRosada", "ARCA_Argentina", "Voceria_Ar",
     # energy / tech trade press that covered the 264/2026 resolution
     "econojournal", "dpl_news", "Minergyar", "enriquecarrier",
 ]
