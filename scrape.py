@@ -5,6 +5,7 @@ in Supabase.
 
     python scraper/scrape.py --mode backfill   # one-off, ~3,000 tweets, last 12 months
     python scraper/scrape.py --mode daily      # cron, ~100 new tweets
+    python scraper/scrape.py --mode test       # smoke test, ≤100 tweets fetched
     python scraper/scrape.py --mode daily --dry-run   # fetch, don't write, dump CSV
 
 Env vars:  TWITTERAPI_IO_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY
@@ -238,8 +239,8 @@ def build_queries() -> list[str]:
 
 def time_windows(mode: str) -> list[tuple[int, int]]:
     now = datetime.now(timezone.utc)
-    if mode == "daily":
-        start = now - timedelta(hours=C.DAILY["lookback_hours"])
+    if mode != "backfill":
+        start = now - timedelta(hours=C.MODES[mode]["lookback_hours"])
         return [(int(start.timestamp()), int(now.timestamp()))]
     wins, end = [], now
     for _ in range(C.BACKFILL["months_back"]):
@@ -250,7 +251,7 @@ def time_windows(mode: str) -> list[tuple[int, int]]:
 
 
 def run(mode: str, dry_run: bool, out_csv: str | None):
-    P = C.DAILY if mode == "daily" else C.BACKFILL
+    P = C.MODES[mode]
     client = Client(os.environ["TWITTERAPI_IO_KEY"], P["hard_cap_tweets_fetched"])
     outlets = {h.lower() for h in C.OUTLETS}
 
@@ -318,7 +319,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
                     consider(t, full)
                 print(f"[{mode}] {qt:6} {datetime.fromtimestamp(since, timezone.utc):%Y-%m-%d} "
                       f"→ {got:3} fetched | {len(seen)} kept | {client.tweets_fetched} total")
-        if mode == "daily":
+        if mode != "backfill":
             break
 
     # ---- Pass 2: expand discussion under news posts -----------------------
@@ -342,7 +343,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     # ---- Classify, trim, write --------------------------------------------
     rows = [to_row(t, *classify(t, outlets), seen_query[tid], mode) for tid, t in seen.items()]
     rows.sort(key=lambda r: r["created_at"], reverse=True)
-    rows = rows[:P["target_new_tweets"]] if mode == "daily" else rows
+    rows = rows[:P["target_new_tweets"]] if mode != "backfill" else rows
 
     counts = {}
     for r in rows:
@@ -377,7 +378,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["backfill", "daily"], default="daily")
+    ap.add_argument("--mode", choices=list(C.MODES), default="daily")
     ap.add_argument("--dry-run", action="store_true", help="don't touch Supabase")
     ap.add_argument("--csv", default=None, help="also write rows to this CSV")
     args = ap.parse_args()
