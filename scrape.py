@@ -229,6 +229,14 @@ def get_supabase():
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
 
 
+def spent_so_far(sb) -> float:
+    try:
+        res = sb.table(C.SUPABASE_RUNS_TABLE).select("est_cost_usd").execute()
+        return float(sum(float(r["est_cost_usd"] or 0) for r in (res.data or [])))
+    except Exception:
+        return 0.0
+
+
 def existing_ids(sb) -> set[str]:
     ids, start, step = set(), 0, 1000
     while True:
@@ -265,6 +273,15 @@ def load_coverage(sb) -> set[tuple]:
     return out
 
 
+def is_covered(covered: set[tuple], since: int, until: int, qi: int, qt: str) -> bool:
+    """Exact cell match, or the cell lies inside a larger window already done
+    (e.g. a whole month marked done covers each of its weeks)."""
+    if (since, until, qi, qt) in covered:
+        return True
+    return any(ws <= since and we >= until and cqi == qi and cqt == qt
+               for ws, we, cqi, cqt in covered)
+
+
 def mark_coverage(sb, since: int, until: int, qi: int, qt: str, fetched: int):
     if sb is None:
         return
@@ -298,20 +315,27 @@ def build_queries() -> list[str]:
     return out
 
 
-def time_windows(mode: str) -> list[tuple[int, int]]:
+def time_windows(mode: str) -> tuple[tuple[int, int] | None, list[tuple[int, int]]]:
+    """(fresh window for the last N hours or None, ISO-week windows newest→oldest
+    down to C.HISTORY_START). Week boundaries are fixed Mondays 00:00 UTC, so the
+    same cells recur from run to run and the coverage ledger can skip them."""
+    P = C.MODES[mode]
     now = datetime.now(timezone.utc)
-    if "lookback_hours" in C.MODES[mode]:
-        start = now - timedelta(hours=C.MODES[mode]["lookback_hours"])
-        return [(int(start.timestamp()), int(now.timestamp()))]
-    # calendar-month windows so they're identical from one run to the next
-    wins = []
-    end = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    wins.append((int(end.timestamp()), int(now.timestamp())))          # current partial month
-    for _ in range(C.MODES[mode]["months_back"]):
-        start = (end - timedelta(days=1)).replace(day=1)
-        wins.append((int(start.timestamp()), int(end.timestamp())))
-        end = start
-    return wins
+    fresh = None
+    if "lookback_hours" in P:
+        start = now - timedelta(hours=P["lookback_hours"])
+        fresh = (int(start.timestamp()), int(now.timestamp()))
+    hist = []
+    if P.get("start_date"):
+        floor = datetime.fromisoformat(P["start_date"]).replace(tzinfo=timezone.utc)
+        monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        hist.append((int(monday.timestamp()), int(now.timestamp())))     # current partial week
+        end = monday
+        while end > floor:
+            start = end - timedelta(days=C.WINDOW_DAYS)
+            hist.append((int(max(start, floor).timestamp()), int(end.timestamp())))
+            end = start
+    return fresh, hist
 
 
 def run(mode: str, dry_run: bool, out_csv: str | None):
@@ -323,6 +347,15 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     known: set[str] = set()
     if not dry_run:
         sb = get_supabase()
+        budget = float(os.environ.get("BUDGET_USD", C.BUDGET_USD))
+        spent = spent_so_far(sb)
+        print(f"spent so far ≈ ${spent:.2f} of ${budget:.2f} budget")
+        if spent >= budget:
+            print("budget reached — not running. Raise BUDGET_USD (env or config) after recharging.")
+            return
+        # never let this run overshoot the budget either
+        remaining_tweets = int((budget - spent) / COST_PER_TWEET)
+        client.hard_cap = min(client.hard_cap, remaining_tweets)
         known = existing_ids(sb)
         print(f"{len(known)} tweets already stored")
         run_row = sb.table(C.SUPABASE_RUNS_TABLE).insert({"run_mode": mode}).execute()
@@ -369,21 +402,31 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
 
     # ---- Pass 1: keyword sweep --------------------------------------------
     queries = build_queries()
-    windows = time_windows(mode)
-    max_pages = P.get("max_pages_per_query_window", P.get("max_pages_per_query", 3))
+    fresh, hist = time_windows(mode)
     news_posts: dict[str, dict] = {}   # candidate threads to expand
-    sweep_mode = "lookback_hours" not in P          # backfill / bonus: remember coverage
-    covered = load_coverage(sb) if sweep_mode else set()
+    covered = load_coverage(sb) if hist else set()
     skipped = 0
+    target = P["target_new_tweets"]
 
-    for (since, until) in windows:
-        if client.over_cap() or len(seen) >= P["target_new_tweets"] * 1.5:
-            break
+    sweep_target = int(target * 0.7)    # leave ~30% of the target for thread replies
+
+    def enough(limit: int = target) -> bool:
+        return client.over_cap() or len(seen) >= limit
+
+    def sweep(since: int, until: int, max_pages: int, ledger: bool, label: str):
+        nonlocal skipped
         for qi, q in enumerate(queries):
+            latest_full = False
             for qt in ("Latest", "Top"):
-                if client.over_cap():
-                    break
-                if sweep_mode and (since, until, qi, qt) in covered:
+                if enough(sweep_target):
+                    return
+                # "Top" re-returns (and re-charges) the same tweets as "Latest" unless
+                # the window was too busy for Latest to exhaust — only then is Top worth it.
+                if qt == "Top" and not latest_full:
+                    if ledger and not client.exhausted:
+                        mark_coverage(sb, since, until, qi, qt, 0)   # nothing more to fetch here
+                    continue
+                if ledger and is_covered(covered, since, until, qi, qt):
                     skipped += 1
                     continue
                 full = f"{q} since_time:{since} until_time:{until}"
@@ -402,13 +445,23 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
                         news_posts[str(t["id"])] = t
                         outlets.add(un)         # auto-discovered outlet
                     consider(t, full)
-                # the current (partial) month is never marked done: new tweets keep arriving
-                if sweep_mode and not client.exhausted and until != windows[0][1]:
+                if qt == "Latest":
+                    latest_full = got >= max_pages * 20 - 2   # every page came back full
+                if ledger and not client.exhausted:
                     mark_coverage(sb, since, until, qi, qt, got)
-                print(f"[{mode}] {qt:6} {datetime.fromtimestamp(since, timezone.utc):%Y-%m-%d} "
+                print(f"[{label}] {qt:6} {datetime.fromtimestamp(since, timezone.utc):%Y-%m-%d} "
                       f"→ {got:3} fetched | {len(seen)} kept | {client.tweets_fetched} total")
-        if "lookback_hours" in P:
+
+    # Phase 1 — what's new (never recorded in the ledger)
+    if fresh:
+        sweep(*fresh, P.get("fresh_pages_per_query", 3), ledger=False, label=f"{mode}:fresh")
+
+    # Phase 2 — history, newest month first; ledger skips cells already fetched.
+    # The current partial month is re-swept but never marked done.
+    for i, (since, until) in enumerate(hist):
+        if enough(sweep_target):
             break
+        sweep(since, until, P["max_pages_per_query_window"], ledger=(i > 0), label=f"{mode}:hist")
 
     # ---- Pass 2: expand discussion under news posts -----------------------
     threads = sorted(news_posts.values(), key=lambda t: t.get("replyCount") or 0, reverse=True)
@@ -420,7 +473,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
         if cid0 in done_cids:
             continue
         done_cids.add(cid0)
-        if client.over_cap() or len(seen) >= P["target_new_tweets"] * 1.5:
+        if enough():
             break
         cid = t.get("conversationId") or t["id"]
         un = (t.get("author") or {}).get("userName") or ""
@@ -445,7 +498,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     counts = {}
     for r in rows:
         counts[r["source_type"]] = counts.get(r["source_type"], 0) + 1
-    if sweep_mode:
+    if hist:
         print(f"coverage: skipped {skipped} already-fetched cells")
     print(f"\nkept {len(rows)} | by source: {counts} | dropped: {dropped}")
     print(f"API pages: {client.pages} | tweets fetched: {client.tweets_fetched} "
