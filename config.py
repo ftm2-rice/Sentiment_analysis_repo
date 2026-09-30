@@ -117,39 +117,54 @@ BOT_RULES = {
 # ---------------------------------------------------------------------------
 # Volume / cost controls (twitterapi.io: ~$0.15 per 1,000 tweets returned)
 # ---------------------------------------------------------------------------
-BACKFILL = {
-    "months_back": 12,
-    "target_new_tweets": 3000,
-    "max_pages_per_query_window": 15,   # 20 tweets/page → 300 per query per month
-    "max_thread_pages": 4,              # 80 replies per news thread
-    "max_threads": 120,
-    "hard_cap_tweets_fetched": 12000,   # ≈ $1.80 worst case
-}
+# Earliest week worth scraping — before this the topic barely existed on X.
+HISTORY_START = "2024-12-01"
+WINDOW_DAYS = 7          # ISO weeks (Monday 00:00 UTC → next Monday)
 
 DAILY = {
-    "lookback_hours": 36,               # overlap on purpose; dedupe handles it
-    "target_new_tweets": 100,
-    "max_pages_per_query": 3,
-    "max_thread_pages": 2,
-    "max_threads": 15,
-    "hard_cap_tweets_fetched": 1000,    # ≈ $0.15 worst case
+    # Phase 1: everything new in the last 48 h (overlap on purpose; dedupe handles it)
+    "lookback_hours": 48,
+    "fresh_pages_per_query": 2,         # 48 h never yields more than ~40 per query
+    # Phase 2: walk backwards one ISO week at a time (coverage ledger skips
+    # weeks already done) until target_new_tweets clean rows are collected.
+    "start_date": HISTORY_START,
+    "max_pages_per_query_window": 4,    # 80 tweets per query per week
+    "target_new_tweets": 1000,          # CLEAN rows (after filters + dedupe).
+                                        # Once dc_tweets has ~4,000 rows, drop this to 200:
+                                        # the cron then just keeps the dataset current.
+    "max_thread_pages": 3,
+    "max_threads": 40,
+    "hard_cap_tweets_fetched": 2500,    # ≈ 37.5k credits ≈ $0.375 worst case per run
+}
+
+# Global spend guard: the script refuses to start once the sum of est_cost_usd in
+# dc_runs reaches this. Override with env BUDGET_USD. $20 recharged → keep $2 margin.
+BUDGET_USD = 18.0
+
+# One-off deep sweep (same engine as daily's phase 2, no fresh phase, bigger caps)
+BACKFILL = {
+    "start_date": HISTORY_START,
+    "target_new_tweets": 5000,
+    "max_pages_per_query_window": 8,
+    "max_thread_pages": 4,
+    "max_threads": 150,
+    "hard_cap_tweets_fetched": 15000,   # ≈ 225k credits ≈ $2.25 worst case
 }
 
 # Smoke test: validates the whole pipeline for ~1,500 credits (≈ $0.015)
 TEST = {
     "lookback_hours": 24 * 14,
+    "fresh_pages_per_query": 1,
+    "max_pages_per_query_window": 1,
     "target_new_tweets": 40,
-    "max_pages_per_query": 1,
     "max_thread_pages": 1,
     "max_threads": 2,
     "hard_cap_tweets_fetched": 100,
 }
 
-# Squeeze the most out of a 10k-credit bonus account: month-by-month sweep like
-# backfill, but stops at ~640 tweets fetched (≈ 9,600 credits). Threads kept small
-# so the budget goes to breadth.
+# Squeeze a 10k-credit bonus account: history only, stops at ~640 fetched.
 BONUS = {
-    "months_back": 12,
+    "start_date": HISTORY_START,
     "target_new_tweets": 10_000,
     "max_pages_per_query_window": 1,
     "max_thread_pages": 1,
