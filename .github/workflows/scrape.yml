@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "test (≤100 fetched) / bonus (≤640 fetched, fits 10k free credits) / daily (~100 new) / backfill (~3k, needs recharge)"
+        description: "daily (new + history until 1000 clean) / test (≤100 fetched) / bonus (≤640 fetched) / backfill (deep one-off)"
         type: choice
         options: [test, bonus, daily, backfill]
         default: daily
@@ -23,7 +23,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     env:
       TWITTERAPI_IO_KEY: ${{ secrets.TWITTERAPI_IO_KEY }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
