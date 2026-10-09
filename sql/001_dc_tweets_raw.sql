@@ -35,4 +35,4 @@ on conflict (tweet_id) do nothing;
 -- and outlet_handle = the outlet; recover found_via / thread_of from that.
 update dc_tweets_raw
    set found_via = 'thread', thread_of = outlet_handle
- where legacy and source_type = 'news_thread' and thread_of is null;
+  where legacy and source_type in ('news_reply', 'news_quote', 'news_thread') and thread_of is null;
