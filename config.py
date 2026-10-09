@@ -35,8 +35,11 @@ ARGENTINA_RE = (
     r"argentin|patagoni|r[ií]o\s+negro|sierra\s+grande|bah[ií]a\s+blanca|buenos\s+aires|"
     r"c[oó]rdoba|mendoza|neuqu[eé]n|vaca\s+muerta|a[ñn]elo|\brigi\b|secretar[ií]a\s+de\s+energ[ií]a|"
     r"cammesa|enarsa|resoluci[oó]n\s+264|\bxdem\b|\bnoa\b|tierra\s+del\s+fuego|chubut|santa\s+cruz|"
-    r"san\s+juan|salta|jujuy|catamarca|tucum[aá]n|rosario|la\s+plata"
+    r"san\s+juan|\bsalta\b|jujuy|catamarca|tucum[aá]n|rosario|la\s+plata"
 )
+# \bsalta\b: without the word boundary "resalta" / "asalta" counted as the province.
+# Known remaining ambiguities (kept on purpose, check by hand in the notebook):
+# "Córdoba" and "Santa Cruz" also exist outside Argentina; "Mendoza" and "Rosario" are surnames.
 LONG_TEXT_CHARS = 600      # above this, require proximity
 PROXIMITY_CHARS = 200   # outlet accounts (OUTLETS) bypass this rule
 
