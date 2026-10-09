@@ -41,10 +41,15 @@ jobs:
           DRY=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then DRY="--dry-run"; fi
           python scrape.py --mode "$MODE" $DRY --csv "out/${MODE}_$(date -u +%F).csv"
+      - name: Re-apply cleaning rules (dc_tweets_raw → dc_tweets)
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: python clean.py --summary out/pipeline_summary.json
       - name: Keep a CSV copy of this run
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: tweets-${{ github.run_id }}
-          path: out/*.csv
+          path: |
+            out/*.csv
+            out/pipeline_summary.json
           retention-days: 30

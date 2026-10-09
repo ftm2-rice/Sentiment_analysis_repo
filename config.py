@@ -102,6 +102,18 @@ AUTO_OUTLET_MIN_REPLIES = 5      # its post must have generated discussion
 # Threshold for tagging a standalone post as "verified_opinion"
 VERIFIED_MIN_FOLLOWERS = 2_000
 
+# The segments (source_type) assigned by filters.classify(), with the wording
+# used downstream (notebook, Streamlit glossary). Edit here, not in app.py.
+SOURCE_TYPES = {
+    "outlet_post":      "headline post of a news outlet or official account — information, not opinion",
+    "news_reply":       "direct reply to an outlet's post",
+    "news_quote":       "quote-repost of an outlet's post with the person's own comment",
+    "news_thread":      "reply inside an outlet's thread, addressed to another commenter",
+    "verified_opinion": f"standalone post by a verified account with ≥ {VERIFIED_MIN_FOLLOWERS:,} followers",
+    "general_public":   "everyone else",
+}
+OPINION_TYPES = [k for k in SOURCE_TYPES if k != "outlet_post"]   # what sentiment is scored on
+
 # ---------------------------------------------------------------------------
 # Bot / spam filter. A tweet is dropped if its author trips any of these.
 # ---------------------------------------------------------------------------
@@ -174,6 +186,7 @@ BONUS = {
 
 MODES = {"backfill": BACKFILL, "daily": DAILY, "test": TEST, "bonus": BONUS}
 
-SUPABASE_TABLE = "dc_tweets"
+SUPABASE_TABLE = "dc_tweets"              # clean rows: what the analysis uses
+SUPABASE_RAW_TABLE = "dc_tweets_raw"      # everything fetched, with drop_reason (NULL = kept)
 SUPABASE_RUNS_TABLE = "dc_runs"
 SUPABASE_COVERAGE_TABLE = "dc_coverage"
