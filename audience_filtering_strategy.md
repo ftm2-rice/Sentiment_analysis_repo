@@ -1,61 +1,33 @@
-# Audience & Data Filtering Strategy (`config.py`)
+# Audience and collection gates (`config.py`, `gates.py`)
 
-The scraper **collects** (search query, known-id skip, retweet exclusion, budget cap). The Colab notebook **filters**. Bot, short-text, off-topic and duplicate-text rules below are Colab rules. They are not applied by `scrape.py`. `is_on_topic` is also used by the scraper only to choose which outlet posts are worth expanding into threads.
+GitHub Actions collects. The Colab notebook filters.
 
----
-
-## 1. Core Inclusion Rules (What We Keep)
-
-To enter the dataset, a tweet must strictly relate to **Data Center developments in Argentina**.
-
-### A. Keyword & Search Queries
-* **Core Topic Match:** Every tweet must contain at least one primary topic keyword:
-  * `"data center"`, `"datacenter"`, `"centro de datos"`, `"centro de cómputo"`
-* **Geographic / Contextual Anchors:** Tweets must explicitly connect to Argentina through location, infrastructure, or regulatory anchors:
-  * *Locations/Regions:* Argentina, Patagonia, Río Negro, Sierra Grande, Bahía Blanca, Buenos Aires, Córdoba, Mendoza, Neuquén, Vaca Muerta, Añelo.
-  * *Policy/Energy:* RIGI, Secretaría de Energía, CAMMESA, ENARSA, Resolução 264.
-* **Company Hooks:** Major tech entities (e.g., OpenAI, Microsoft, Google, AWS, Nvidia, Cirion) are queried **only** when paired directly with Argentina anchors and core data center terms to avoid global off-topic chatter.
-
-### B. Proximity Rule for Long Form Content
-* For tweets longer than **600 characters** (`LONG_TEXT_CHARS`), the topic term and Argentina anchor must appear within **200 characters** (`PROXIMITY_CHARS`) of each other. This prevents keeping lengthy news digests that mention "data centers" and "Argentina" in completely unrelated paragraphs.
+This file describes what **this repository** decides. Bot, short-text, off-topic, and duplicate-text rules are not implemented here. They run in the Colab notebook that reads `dc_tweets_raw`.
 
 ---
 
-## 2. Audience & Segment Classification
+## 1. What the search asks for
 
-We categorize preserved tweets into six target audience segments:
+Every query is a data-center term **and** an Argentina anchor (`CORE_TERMS`, `ARGENTINA_ANCHORS`). Company names are only used together with both. `-filter:nativeretweets` drops plain retweets before we pay for them. A retweet the API still returns is stored in `dc_tweets_raw` with `drop_reason = retweet` and is not copied to `dc_tweets`.
 
-1. **Outlet Posts (`outlet_post`)**:
-   * Direct posts authored by predefined press, news networks, trade journals, or official entities (e.g., `@clarincom`, `@LANACION`, `@econojournal`, `@MinEconomia_Ar`).
-2. **Auto-Detected Outlets**:
-   * Accounts with $\ge 50,000$ followers whose topic post generates $\ge 5$ replies.
-3. **News Threads (`news_thread`)**:
-   * Multi-tweet informational sequences published by media outlets or journalists.
-4. **News Replies (`news_reply`) & Quote Tweets (`news_quote`)**:
-   * User interactions directly engaging with an official outlet post.
-5. **Verified Opinion (`verified_opinion`)**:
-   * Standalone posts from non-outlet verified users with $\ge 2,000$ followers.
-6. **General Public (`general_public`)**:
-   * Organic posts from everyday standard user accounts passing all topic filters.
+Ids already in `dc_tweets` are not stored again.
 
----
+## 2. Thread expansion
 
-## 3. Exclusion Rules (What Colab Sets Aside)
+`gates.is_on_topic` is a cost gate, not a drop. An outlet post (or a large verified account) is expanded only when its own text has a data-center term and an Argentina term. For a text longer than `LONG_TEXT_CHARS` (600), those terms must sit within `PROXIMITY_CHARS` (200). A mention that is only inside `ARGENTINA_FALSE_RE` (comparison, commodity, sports) does not count, so that thread is not expanded. The tweet is still stored.
 
-The scraper still drops plain retweets (`-filter:nativeretweets`, and `retweeted_tweet` in code) and skips ids already in `dc_tweets`. Everything else is stored. The Colab notebook then sets aside tweets that match the rules below:
+## 3. Who is speaking (`source_type`)
 
-### A. False Positives & Irrelevant Context
-* **Commodity / Comparison References (`ARGENTINA_FALSE_RE`):**
-  * Dropped if "Argentina" is used strictly as a comparison or trade commodity (e.g., *"beef from argentina"*, *"carne argentina"*, *"than argentina"*).
-* **Sports & Culture Off-Topic:**
-  * Mentions of Messi, World Cup (*mundial*), or sports matches (*vs Argentina*).
-* **Standalone Political Noise:**
-  * Generic political chatter mentioning Milei, Caputo, or US Stargate without explicit data center context.
+`gates.classify()` labels every stored tweet. The label is not a filter.
 
-### B. Structural & Bot/Spam Filters (`BOT_RULES`)
-* **Native Retweets:** Removed by the scraper (`-filter:nativeretweets`, plus any `retweeted_tweet` the API still returns). Not a Colab filter.
-* **X Automated Flag:** Dropped if the account carries X's official "Automated" label.
-* **Spam Username Patterns:** Handles matching bot patterns (e.g., containing `bot`, `_ia`, `_ai`, `ainew`, `noticias24`, `digest`, `summary`).
-* **High Frequency Accounts:** Accounts posting $>150$ tweets per day over their lifetime.
-* **Account Age:** Accounts under 14 days old.
-* **Empty Content:** Tweets with $< 25$ characters or replies containing only `@handles` and URLs without text.
+1. **`outlet_post`** — headline post of a configured outlet or official account.
+2. **`news_reply`** / **`news_quote`** — direct reply to, or quote of, an outlet post.
+3. **`news_thread`** — another reply found by expanding an outlet thread.
+4. **`verified_opinion`** — standalone post by a verified account with at least `VERIFIED_MIN_FOLLOWERS` (2,000).
+5. **`general_public`** — everyone else.
+
+An account that is not on the outlet list is treated as one for expansion when it is verified, has at least `AUTO_OUTLET_MIN_FOLLOWERS` (50,000), and its on-topic post has at least `AUTO_OUTLET_MIN_REPLIES` (5) replies.
+
+## 4. What Colab does, not this repo
+
+After the daily run, the Colab notebook reads `dc_tweets_raw` and sets aside bots, short texts, off-topic posts, and duplicate texts, then builds the TF/TF-IDF tables the Streamlit app displays. Changing those rules does not require a change here, and this repo will not re-apply them.

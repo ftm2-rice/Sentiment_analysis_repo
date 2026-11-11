@@ -24,15 +24,14 @@ ARGENTINA_ANCHORS = (
 # pulled in the US Stargate (Abilene, New Mexico) and Milei pulled in jokes.
 
 # ---------------------------------------------------------------------------
-# Topic check for the Colab notebook, and for the scraper only as a cost gate:
-# which outlet posts are worth expanding into threads. The scraper does NOT
-# drop a tweet for failing this check.
+# Thread-seed gate (gates.is_on_topic). Not a drop: a tweet that fails this
+# is still stored. It only decides which outlet posts are worth expanding.
 #
-# X search matches anywhere in a long post, so a 2,000-char digest mentioning
-# "data centers" once and "Argentina" once elsewhere gets through the query.
-# For the Colab filter, a tweet passes only if a data-center term and an
-# Argentina term both appear, and for long texts they must sit within
-# PROXIMITY_CHARS of each other.
+# X search matches anywhere in a long post, so a digest can mention "data
+# centers" once and "Argentina" once in an unrelated paragraph. For a long
+# text, the two terms must sit within PROXIMITY_CHARS or the thread is not
+# expanded. lenient=True skips that proximity requirement; the daily scrape
+# does not pass it.
 # ---------------------------------------------------------------------------
 TOPIC_RE = r"data\s?-?cent(?:er|re)s?|datacenters?|centros?\s+de\s+(?:datos|c[oó]mputo)|#centrosdedatos"
 ARGENTINA_RE = (
@@ -42,13 +41,14 @@ ARGENTINA_RE = (
     r"san\s+juan|\bsalta\b|jujuy|catamarca|tucum[aá]n|rosario|la\s+plata"
 )
 # \bsalta\b: without the word boundary "resalta" / "asalta" counted as the province.
-# Known remaining ambiguities (kept on purpose, check by hand in the notebook):
+# Known remaining ambiguities (the thread gate still treats these as Argentina):
 # "Córdoba" and "Santa Cruz" also exist outside Argentina; "Mendoza" and "Rosario" are surnames.
-LONG_TEXT_CHARS = 600      # above this, require proximity
-PROXIMITY_CHARS = 200   # outlet accounts (OUTLETS) bypass this rule
+LONG_TEXT_CHARS = 600      # above this, the thread gate requires proximity
+PROXIMITY_CHARS = 200      # how close the two terms must be in a long text
 
-# Phrases where "Argentina" is only a comparison unit or a commodity, not the place
-# the data center is in. A tweet whose ONLY Argentina mention is one of these is dropped.
+# Phrases where "Argentina" is only a comparison or a commodity, not the place
+# the data center is in. If that is the only Argentina mention, is_on_topic is
+# false and the thread is not expanded. The tweet is still stored.
 ARGENTINA_FALSE_RE = (
     r"than\s+argentina|beef\s+from\s+argentina|argentin\w*\s+beef|carne\s+argentina|"
     r"argentina\s+(?:vs|v\.?)\s|messi|mundial|world\s+cup"
@@ -109,8 +109,8 @@ AUTO_OUTLET_MIN_REPLIES = 5      # its post must have generated discussion
 # Threshold for tagging a standalone post as "verified_opinion"
 VERIFIED_MIN_FOLLOWERS = 2_000
 
-# The segments (source_type) assigned by filters.classify(), with the wording
-# used downstream (notebook, Streamlit glossary). Edit here, not in app.py.
+# The segments (source_type) assigned by gates.classify(). A label, not a filter.
+# Sentiment scoring happens later, in Colab.
 SOURCE_TYPES = {
     "outlet_post":      "headline post of a news outlet or official account — information, not opinion",
     "news_reply":       "direct reply to an outlet's post",
@@ -118,20 +118,6 @@ SOURCE_TYPES = {
     "news_thread":      "reply inside an outlet's thread, addressed to another commenter",
     "verified_opinion": f"standalone post by a verified account with ≥ {VERIFIED_MIN_FOLLOWERS:,} followers",
     "general_public":   "everyone else",
-}
-OPINION_TYPES = [k for k in SOURCE_TYPES if k != "outlet_post"]   # what sentiment is scored on
-
-# ---------------------------------------------------------------------------
-# Bot / spam / length rules for the Colab notebook that reads dc_tweets_raw.
-# Not applied by scrape.py. min_text_chars is the "short" rule; the rest feed is_bot().
-# ---------------------------------------------------------------------------
-BOT_RULES = {
-    "drop_if_automated_flag": True,          # X's own "Automated" label
-    "drop_if_username_matches": r"(?i)(bot|_ia$|_ai$|ainew|noticias24|news24|digest|podcast_|summary)",
-    "max_statuses_per_day": 150,             # tweets/day over account lifetime
-    "min_account_age_days": 14,
-    "drop_if_no_text_after_mentions": True,  # replies that are only @handles / links
-    "min_text_chars": 25,
 }
 
 # ---------------------------------------------------------------------------

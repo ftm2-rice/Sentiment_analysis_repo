@@ -37,8 +37,8 @@ import requests                             # HTTP calls to the API
 
 sys.path.insert(0, str(Path(__file__).parent))      # so `import config` works from any folder
 import config as C  # noqa: E402
-from filters import (parse_dt, author_is_verified, is_on_topic,  # noqa: E402
-                     tweet_topic_text, collection_reason, classify, to_row)
+from gates import (parse_dt, author_is_verified, is_on_topic,  # noqa: E402
+                   tweet_topic_text, collection_reason, classify, to_row)
 
 API = "https://api.twitterapi.io/twitter/tweet/advanced_search"   # the search endpoint
 COST_PER_TWEET = 0.00015  # $0.15 per 1,000 tweets returned
@@ -269,7 +269,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
         if tid in known:
             dropped["known"] += 1                   # already in dc_tweets from an earlier run: nothing new
             return False
-        reason = collection_reason(t)               # retweet, or None (filters.py)
+        reason = collection_reason(t)               # retweet, or None (gates.py)
         if reason:
             dropped[reason] += 1
             rejected.append((t, reason, query, thread_of))         # keep the retweet in the raw table
@@ -370,8 +370,8 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     rows.sort(key=lambda r: r["created_at"], reverse=True)              # newest first
     kept, over = rows[:P["target_new_tweets"]], rows[P["target_new_tweets"]:]   # cap counts stored rows
 
-    # The raw table = everything fetched this run: survivors with drop_reason NULL,
-    # rows beyond the cap as "over_target", rejects with the rule that fired.
+    # The raw table = everything fetched this run: keepers with drop_reason NULL,
+    # rows beyond the cap as "over_target", retweets as "retweet".
     def raw_row(r: dict, reason: str | None, thread_of: str | None) -> dict:
         return {**r, "drop_reason": reason, "found_via": "thread" if thread_of else "search",
                 "thread_of": thread_of, "run_id": run_id, "legacy": False}
@@ -379,7 +379,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     raw_rows = [raw_row(r, None, seen_thread.get(r["tweet_id"])) for r in kept]
     raw_rows += [raw_row(r, "over_target", seen_thread.get(r["tweet_id"])) for r in over]
     for t, reason, q, thread_of in rejected:
-        st, oh = classify(t, outlets, thread_of=thread_of)              # segment even for rejects (useful in the notebook)
+        st, oh = classify(t, outlets, thread_of=thread_of)              # label the retweet too; source_type is not a drop
         raw_rows.append(raw_row(to_row(t, st, oh, q, mode), reason, thread_of))
     rows = kept
 

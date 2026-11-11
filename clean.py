@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-clean.py — keep dc_tweets in step with what the scraper kept.
+clean.py — mirror scraper-kept rows from dc_tweets_raw into dc_tweets.
 
     python clean.py                     # Supabase → Supabase; writes out/pipeline_summary.json
-    python clean.py --dry-run           # print counts, write nothing to Supabase
-    python clean.py --csv raw.csv       # read a CSV export of dc_tweets_raw instead of Supabase
-                                        # (what the notebook does); never writes to Supabase
+    python clean.py --dry-run           # print the mirror count, write nothing
+    python clean.py --csv raw.csv       # read a CSV export of dc_tweets_raw; never writes to Supabase
 
-The scraper collects (retweets and known ids only). The Colab notebook filters
-(bot, short, offtopic, dup_text) when it reads dc_tweets_raw.
+scrape.py already writes both tables for the rows it just fetched. This script
+re-reads the whole raw table and makes dc_tweets match: NULL and over_target
+rows are in, retweets are out. source_type is refreshed with gates.classify().
 
-This script does not re-apply those Colab filters. dc_tweets mirrors scraper-kept
-rows: drop_reason NULL or over_target, retweets excluded. Historical rows that
-already say bot/short/offtopic/dup_text are left as stored — not promoted into
-dc_tweets, and not deleted if they are already there. Nothing else is deleted
-except a retweet that is still sitting in dc_tweets.
+Rows collected by an older scraper may still say bot, short, offtopic, or
+dup_text. Those labels are not assigned here. The mirror leaves them as stored:
+it does not copy them into dc_tweets, and it does not delete them.
 
-apply_rules / funnel still reproduce the Colab funnel for the notebook. The
-daily job prints that funnel and does not write it back.
+Analysis filtering (bot, short, offtopic, dup_text) lives in the Colab notebook,
+not in this file.
 
 Env vars (Supabase mode): SUPABASE_URL, SUPABASE_SERVICE_KEY
 """
@@ -28,14 +26,16 @@ import csv                                  # read/write CSV files
 import json                                 # the `raw` column is JSON text in a CSV
 import os                                   # environment variables
 import sys                                  # to add the repo folder to the import path
-from collections import Counter             # counting verdicts
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))      # so `import config` works from any folder
 import config as C  # noqa: E402
-from filters import (CONTENT_REASONS, ANALYSIS_REASONS, content_reason,  # noqa: E402
-                     classify, text_key)
+from gates import classify  # noqa: E402
+
+# Older scrapes wrote these drop_reason values. This repo no longer assigns them.
+# The mirror does not promote those rows and does not delete them.
+LEFT_AS_STORED = ("bot", "short", "offtopic", "dup_text")
 
 
 # ---------------------------------------------------------------------------
@@ -97,75 +97,7 @@ def tweet_dict(r: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# The pipeline as a pure function: rows in → one verdict per row out
-# ---------------------------------------------------------------------------
-def apply_rules(rows: list[dict]) -> list[dict]:
-    """Colab inspection verdict per row. The daily job does not write this back.
-
-    Dedupe keeps the row that is currently clean (if any), else the earliest one.
-    """
-    outlets = {h.lower() for h in C.OUTLETS}                                            # the configured outlets…
-    outlets |= {str(r["outlet_handle"]).lower() for r in rows if r.get("outlet_handle")}  # …plus auto-discovered ones
-
-    # Judge the currently-clean rows first, then the rest by date, so that when two
-    # rows share the same text the one already in dc_tweets is the one that survives.
-    order = sorted(rows, key=lambda r: (r.get("drop_reason") is not None, r.get("created_at") or ""))
-    seen_text: set[str] = set()                             # normalised texts already kept
-    verdicts = []
-    for r in order:
-        t = tweet_dict(r)                                   # API-shaped object
-        thread_of = r.get("thread_of") or None              # outlet whose thread it came from, if any
-        reason = content_reason(t, outlets, thread_reply=(r.get("found_via") == "thread"))   # rules 1–2
-        if reason is None:                                  # passed the content rules → check duplicates
-            k = text_key(t)
-            if k in seen_text:
-                reason = "dup_text"
-            else:
-                seen_text.add(k)
-        st, oh = classify(t, outlets, thread_of=thread_of)  # rule 3: segment
-        verdicts.append({"tweet_id": r["tweet_id"], "drop_reason": reason,
-                         "source_type": st, "outlet_handle": oh})
-    return verdicts
-
-
-def funnel(rows: list[dict], verdicts: list[dict]) -> dict:
-    """Colab analysis funnel for the notebook. Not what the daily job writes to dc_tweets."""
-    by_reason = Counter(v["drop_reason"] or "kept" for v in verdicts)                   # how many per reason
-    kept_ids = {v["tweet_id"] for v in verdicts if v["drop_reason"] is None}            # ids that passed
-    by_type = Counter(v["source_type"] for v in verdicts if v["drop_reason"] is None)   # segments among kept
-    by_lang = Counter((r.get("lang") or "?") for r in rows if r["tweet_id"] in kept_ids)  # languages among kept
-    steps, remaining = [], len(rows)
-    steps.append({"step": "fetched (dc_tweets_raw)", "remaining": remaining})
-    for reason in CONTENT_REASONS:                          # subtract each rule in pipeline order
-        n = by_reason.get(reason, 0)
-        remaining -= n
-        steps.append({"step": f"− {reason}", "dropped": n, "remaining": remaining})
-    return {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "n_raw": len(rows),
-        "n_clean": len(kept_ids),
-        "funnel": steps,
-        "dropped_by_reason": dict(by_reason),
-        "clean_by_source_type": dict(by_type),
-        "clean_by_lang": dict(by_lang),
-        "source_types": C.SOURCE_TYPES,                     # segment names + meaning (for the app's glossary)
-        "rules": {                                          # the thresholds in force when this was generated
-            "topic_regex": C.TOPIC_RE,
-            "argentina_regex": C.ARGENTINA_RE,
-            "argentina_false_regex": C.ARGENTINA_FALSE_RE,
-            "long_text_chars": C.LONG_TEXT_CHARS,
-            "proximity_chars": C.PROXIMITY_CHARS,
-            "bot_rules": C.BOT_RULES,
-            "verified_min_followers": C.VERIFIED_MIN_FOLLOWERS,
-            "auto_outlet_min_followers": C.AUTO_OUTLET_MIN_FOLLOWERS,
-            "auto_outlet_min_replies": C.AUTO_OUTLET_MIN_REPLIES,
-        },
-        "search_queries": C.SEARCH_QUERIES,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Output
+# Mirror: which raw rows belong in dc_tweets
 # ---------------------------------------------------------------------------
 # The columns of dc_tweets (the raw table has these plus drop_reason, found_via, thread_of, run_id, legacy).
 CLEAN_COLS = ["tweet_id", "created_at", "text", "lang", "url", "author_id", "author_username",
@@ -202,9 +134,9 @@ def mirror_verdicts(rows: list[dict]) -> list[dict]:
 
     Retweets stay out. NULL and over_target count as kept (over_target is reported
     as None here so write_supabase copies the row into dc_tweets; the stored
-    over_target label is left alone when the other fields match). Historical
-    bot/short/offtopic/dup_text reasons are returned unchanged.
-    source_type is still refreshed with classify().
+    over_target label is left alone when the other fields match). Rows whose
+    drop_reason is in LEFT_AS_STORED are returned unchanged.
+    source_type is refreshed with classify().
     """
     outlets = {h.lower() for h in C.OUTLETS}
     outlets |= {str(r["outlet_handle"]).lower() for r in rows if r.get("outlet_handle")}
@@ -214,7 +146,7 @@ def mirror_verdicts(rows: list[dict]) -> list[dict]:
         stored = r.get("drop_reason") or None
         if t.get("retweeted_tweet") or stored == "retweet":
             reason = "retweet"
-        elif stored in ANALYSIS_REASONS:
+        elif stored in LEFT_AS_STORED:
             reason = stored                               # do not promote, do not clear
         else:
             reason = None                                 # NULL or over_target → in dc_tweets
@@ -243,7 +175,7 @@ def write_supabase(sb, rows: list[dict], verdicts: list[dict]) -> dict:
                                   **{k: v[k] for k in ("source_type", "outlet_handle")}})
         elif v["drop_reason"] == "retweet" and v["tweet_id"] in in_clean:
             to_delete.append(v["tweet_id"])                 # retweets stay out of dc_tweets
-        # bot/short/offtopic/dup_text: leave the row where it is. Do not delete it.
+        # LEFT_AS_STORED (old bot/short/offtopic/dup_text labels): do not delete.
 
     _batched(sb, C.SUPABASE_RAW_TABLE, changed_raw)
     _batched(sb, C.SUPABASE_TABLE, to_upsert)
@@ -270,30 +202,28 @@ def main():
         rows = load_raw_supabase(sb)
     print(f"{len(rows)} rows in {C.SUPABASE_RAW_TABLE}")
 
-    # 2. Colab funnel is printed for inspection only. It is not written back.
-    inspection = apply_rules(rows)
-    summary = funnel(rows, inspection)
-    summary["pipeline"] = "scraper collects (cost-saving gates only); Colab filters"
-    summary["note"] = (
-        "The funnel above is the Colab inspection (apply_rules). It is not written to "
-        "dc_tweets. The mirror is scraper-kept rows: drop_reason null or over_target, "
-        "retweets excluded. Historical bot/short/offtopic/dup_text rows are left as stored."
-    )
-    print("Colab inspection only (not written to dc_tweets):")
-    for s in summary["funnel"]:
-        print(f"  {s['step']:<28} {s.get('dropped', ''):>6}  → {s['remaining']}")
-
-    # 3. what dc_tweets should hold
+    # 2. what dc_tweets should hold. No analysis funnel — that lives in Colab.
     verdicts = mirror_verdicts(rows)
-    summary["n_mirror"] = sum(1 for v in verdicts if v["drop_reason"] is None)
-    print(f"dc_tweets mirror: {summary['n_mirror']} scraper-kept rows")
+    n_mirror = sum(1 for v in verdicts if v["drop_reason"] is None)
+    print(f"dc_tweets mirror: {n_mirror} scraper-kept rows")
+    summary = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "pipeline": "GitHub Actions collects; Colab filters",
+        "n_raw": len(rows),
+        "n_mirror": n_mirror,
+        "note": (
+            "dc_tweets mirrors scraper-kept rows (drop_reason null or over_target, "
+            "retweets excluded). bot/short/offtopic/dup_text are applied in Colab, "
+            "not here. Older rows that already carry those labels are left as stored."
+        ),
+    }
 
-    # 4. write the summary JSON (the notebook and the Streamlit app read this)
+    # 3. write the summary JSON
     Path(args.summary).parent.mkdir(parents=True, exist_ok=True)
     Path(args.summary).write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"wrote {args.summary}")
 
-    # 5. optional CSV of the clean rows
+    # 4. optional CSV of the mirror rows
     if args.out_clean:
         by_id = {r["tweet_id"]: r for r in rows}
         with open(args.out_clean, "w", newline="", encoding="utf-8") as f:
@@ -305,7 +235,7 @@ def main():
                     w.writerow({**by_id[v["tweet_id"]], **v})
         print(f"wrote {args.out_clean}")
 
-    # 6. write the mirror back (unless --csv or --dry-run). Does not re-apply Colab filters.
+    # 5. write the mirror back (unless --csv or --dry-run)
     if sb is not None and not args.dry_run:
         print(write_supabase(sb, rows, verdicts))
 

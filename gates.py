@@ -1,15 +1,17 @@
 """
-filters.py — shared rules, as functions.
+gates.py — what the collector checks, and how a tweet becomes a database row.
 
-The numbers and regexes live in config.py.
+Nothing here decides bot / short / off-topic / duplicate-text. That filtering
+lives in the Colab notebook that reads dc_tweets_raw.
 
-  * scrape.py uses collection_reason. The only content drop at collection time
-    is a retweet. Bot, short text, off-topic and duplicate text are not applied.
-  * The Colab notebook (and clean.apply_rules, for inspection) uses content_reason.
-    Order: retweet → bot → short → offtopic → (dup_text, done by the caller).
+This module does three jobs:
 
-is_on_topic is also the scraper's cost gate for which outlet posts get their
-threads expanded. That does not drop the tweet.
+  * collection_reason — drop a plain retweet (the only content drop)
+  * is_on_topic       — cost gate: only expand a thread if the outlet post
+                        itself is about data centers in Argentina
+  * classify / to_row — label source_type and flatten the API object
+
+Thresholds and regexes live in config.py.
 """
 from __future__ import annotations          # lets us write `str | None` on Python < 3.10
 
@@ -18,15 +20,6 @@ from datetime import datetime, timezone     # dates, always in UTC
 from email.utils import parsedate_to_datetime   # parses X's date format ("Tue Sep 01 12:00:00 +0000 2026")
 
 import config as C                          # all thresholds and regexes; referenced as C.SOMETHING
-
-# Every value dc_tweets_raw.drop_reason can hold.
-# The scraper writes NULL, "retweet", or "over_target".
-# bot / short / offtopic / dup_text are Colab verdicts. Older rows may still store them.
-DROP_REASONS = ["retweet", "bot", "short", "offtopic", "dup_text", "over_target"]
-# Colab order (content_reason). Not applied by scrape.py.
-# "over_target" only means the scraper's per-run cap was reached; it is not a quality verdict.
-CONTENT_REASONS = ["retweet", "bot", "short", "offtopic", "dup_text"]
-ANALYSIS_REASONS = ["bot", "short", "offtopic", "dup_text"]   # Colab-only; left as stored by clean.py
 
 
 # ---------------------------------------------------------------------------
@@ -45,68 +38,19 @@ def parse_dt(s: str | None) -> datetime | None:
             return None                                     # neither worked → give up quietly
 
 
-def visible_text(t: dict) -> str:
-    """The text a reader actually sees: without the leading @mentions and without links."""
-    txt = t.get("text") or ""                               # full text, "" if missing
-    rng = t.get("displayTextRange")                         # X gives [start, end] of the visible part
-    if isinstance(rng, list) and len(rng) == 2:             # only if it looks like [start, end]
-        try:
-            txt = txt[rng[0]:rng[1]]                        # slice the string to that range
-        except Exception:
-            pass                                            # odd values → keep the full text
-    txt = re.sub(r"https?://\S+", "", txt)                  # delete every http(s)://… link
-    return txt.strip()                                      # remove spaces at both ends
-
-
-def text_key(t: dict) -> str:
-    """A normalised version of the text, used to detect copy-paste reposts."""
-    return re.sub(r"\W+", " ", visible_text(t).lower())[:200]   # lowercase, punctuation → space, first 200 chars
-
-
 def author_is_verified(a: dict) -> bool:
     """Blue check (paid) or any other verification type (organisation, government…)."""
     return bool(a.get("isBlueVerified")) or bool(a.get("verifiedType"))
 
 
 # ---------------------------------------------------------------------------
-# Rule 1 — bots and spam accounts
-# ---------------------------------------------------------------------------
-def is_bot(author: dict) -> str | None:
-    """Return the name of the BOT_RULES entry that fired, or None if the account looks human."""
-    R = C.BOT_RULES                                         # the dict of thresholds in config.py
-    if R["drop_if_automated_flag"] and author.get("isAutomated"):
-        return "automated_flag"                             # X itself labels the account "Automated"
-    un = author.get("userName") or ""                       # the @handle, "" if missing
-    if re.search(R["drop_if_username_matches"], un):
-        return "username_pattern"                           # handle contains bot / _ai / digest / …
-    created = parse_dt(author.get("createdAt"))             # when the account was created
-    if created:
-        age = max((datetime.now(timezone.utc) - created).days, 1)   # account age in days, at least 1
-        if age < R["min_account_age_days"]:
-            return "account_too_new"                        # younger than the minimum
-        if (author.get("statusesCount") or 0) / age > R["max_statuses_per_day"]:
-            return "posting_rate"                           # lifetime posts ÷ days alive is too high
-    return None                                             # no rule fired
-
-
-# ---------------------------------------------------------------------------
-# Rule 2 — is it really about data centers in Argentina?
+# Thread-seed gate — is this outlet post about data centers in Argentina?
+# Used only to decide which threads are worth paying to expand. A tweet that
+# fails this check is still stored.
 # ---------------------------------------------------------------------------
 _TOPIC = re.compile(C.TOPIC_RE, re.I)             # data-center words, case-insensitive
 _AR = re.compile(C.ARGENTINA_RE, re.I)            # Argentina words (country, provinces, agencies…)
 _AR_FALSE = re.compile(C.ARGENTINA_FALSE_RE, re.I)   # phrases where "Argentina" is NOT the place
-
-
-def topic_matches(text: str) -> list[str]:
-    """Every data-center term found in the text (for inspection in the notebook)."""
-    return [m.group() for m in _TOPIC.finditer(text or "")]
-
-
-def argentina_matches(text: str) -> list[str]:
-    """Every Argentina term found, excluding those inside a false phrase (than Argentina, carne argentina…)."""
-    false_spans = [(m.start(), m.end()) for m in _AR_FALSE.finditer(text or "")]   # character ranges of false phrases
-    return [m.group() for m in _AR.finditer(text or "")                            # each Argentina match…
-            if not any(s0 <= m.start() < s1 for s0, s1 in false_spans)]            # …unless it starts inside a false span
 
 
 def is_on_topic(text: str, lenient: bool = False) -> bool:
@@ -120,7 +64,7 @@ def is_on_topic(text: str, lenient: bool = False) -> bool:
     if not t or not a:
         return False                                        # one of the two is missing
     if lenient or len(text) <= C.LONG_TEXT_CHARS:
-        return True                                         # short text (or outlet): both present is enough
+        return True                                         # short text (or lenient caller): both present is enough
     return any(abs(i - j) <= C.PROXIMITY_CHARS for i in t for j in a)   # long text: some pair must be close
 
 
@@ -130,44 +74,19 @@ def tweet_topic_text(t: dict) -> str:
     return f"{t.get('text') or ''}\n{q.get('text') or ''}"  # both texts, joined by a newline
 
 
-# ---------------------------------------------------------------------------
-# All content rules in one call
-# ---------------------------------------------------------------------------
 def collection_reason(t: dict) -> str | None:
-    """Content drop applied by the scraper, or None if the tweet is stored.
+    """The only content drop at collection time, or None if the tweet is stored.
 
-    Only a plain retweet is dropped. Bot, short, off-topic and duplicate text
-    are Colab filters — see content_reason. The per-run cap (over_target) is
-    applied by scrape.py after this, and it counts stored rows.
+    A plain retweet is someone else's words. Bot, short text, off-topic and
+    duplicate text are not decided here.
     """
     if t.get("retweeted_tweet"):
-        return "retweet"                                    # a plain RT: someone else's words
+        return "retweet"
     return None
 
 
-def content_reason(t: dict, outlets: set[str], thread_reply: bool = False) -> str | None:
-    """Colab analysis verdict, or None if the tweet passes. The scraper does not call this.
-
-    outlets:      lowercase handles treated as news outlets (they get the lenient topic check)
-    thread_reply: the tweet was found by expanding an on-topic outlet thread; such replies
-                  don't have to repeat the keywords, so the off-topic rule is skipped.
-    Dedupe is NOT done here: it needs the set of texts already kept, which the caller holds.
-    """
-    if t.get("retweeted_tweet"):
-        return "retweet"                                    # a plain RT: someone else's words
-    a = t.get("author") or {}                               # the author object, or {}
-    if is_bot(a):
-        return "bot"                                        # rule 1
-    if len(visible_text(t)) < C.BOT_RULES["min_text_chars"]:
-        return "short"                                      # too little text to hold an opinion
-    if not thread_reply and not is_on_topic(
-            tweet_topic_text(t), lenient=(a.get("userName") or "").lower() in outlets):
-        return "offtopic"                                   # rule 2 (outlets judged leniently)
-    return None                                             # passed
-
-
 # ---------------------------------------------------------------------------
-# Rule 3 — who is speaking (segment / source_type)
+# Who is speaking (segment / source_type) — a label, not a drop
 # ---------------------------------------------------------------------------
 def classify(t: dict, outlets: set[str], thread_of: str | None = None) -> tuple[str, str | None]:
     """Return (source_type, outlet_handle). thread_of = the outlet whose thread the tweet was found in."""
