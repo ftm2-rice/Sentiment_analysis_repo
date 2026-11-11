@@ -1,6 +1,11 @@
 # Audience & Data Filtering Strategy (`config.py`)
 
-This document outlines the filtering parameters, audience categorization, and noise-reduction rules applied during our Twitter/X data collection pipeline.
+The scraper **collects** (cost-saving gates only). The Colab notebook **filters**.
+
+This document lists both layers. Only the search query, the known-id skip, the
+budget cap and the thread-expansion gate (`is_on_topic` on outlet posts) run
+inside `scrape.py`. Bot, short-text, off-topic and duplicate-text rules run in
+the Colab notebook that reads `dc_tweets_raw`. `source_type` is a label, not a drop.
 
 ---
 
@@ -40,9 +45,19 @@ We categorize preserved tweets into six target audience segments:
 
 ---
 
-## 3. Exclusion Rules (What We Leave)
+## 3. Exclusion Rules
 
-To maintain high data quality and remove noise, tweets meeting any of the following criteria are dropped immediately:
+### At collection time (saves API credits)
+
+* **Native retweets** — `-filter:nativeretweets` on the query. A retweet that still comes back is stored in `dc_tweets_raw` with `drop_reason = retweet` and is not copied to `dc_tweets`.
+* **Already-stored ids** — anything in `dc_tweets_raw` is not requested again. A Latest page that is entirely known ids stops pagination.
+* **Historical weeks** — `--mode daily` does not re-walk them (`backfill_history: False`). `--mode backfill` does, and the `dc_coverage` ledger skips finished cells.
+* **Quiet threads** — a thread is expanded only when the seed tweet is new or its `reply_count` is higher than the value we stored.
+* **Off-topic threads** — `is_on_topic` is used only to choose which outlet posts are worth expanding. The tweet is still stored.
+
+### In the Colab notebook (analysis — not applied by the scraper)
+
+Tweets meeting any of the following are set aside by the Colab notebook. They are still stored in `dc_tweets_raw` (and, for rows collected from now on, in `dc_tweets` too).
 
 ### A. False Positives & Irrelevant Context
 * **Commodity / Comparison References (`ARGENTINA_FALSE_RE`):**
@@ -53,8 +68,7 @@ To maintain high data quality and remove noise, tweets meeting any of the follow
   * Generic political chatter mentioning Milei, Caputo, or US Stargate without explicit data center context.
 
 ### B. Structural & Bot/Spam Filters (`BOT_RULES`)
-* **Native Retweets:** Plain retweets (`-filter:nativeretweets`) are excluded to prioritize original opinions and direct discussions.
-* **X Automated Flag:** Dropped if the account carries X's official "Automated" label.
+* **X Automated Flag:** Set aside if the account carries X's official "Automated" label.
 * **Spam Username Patterns:** Handles matching bot patterns (e.g., containing `bot`, `_ia`, `_ai`, `ainew`, `noticias24`, `digest`, `summary`).
 * **High Frequency Accounts:** Accounts posting $>150$ tweets per day over their lifetime.
 * **Account Age:** Accounts under 14 days old.

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "daily (new + history until 1000 clean) / test (≤100 fetched) / bonus (≤640 fetched) / backfill (deep one-off)"
+        description: "daily (new tweets, history off) / test (≤100 fetched) / bonus (≤640 fetched) / backfill (deep one-off)"
         type: choice
         options: [test, bonus, daily, backfill]
         default: daily
@@ -41,8 +41,10 @@ jobs:
           DRY=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then DRY="--dry-run"; fi
           python scrape.py --mode "$MODE" $DRY --csv "out/${MODE}_$(date -u +%F).csv"
-      - name: Re-apply cleaning rules (dc_tweets_raw → dc_tweets)
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+      - name: Sync dc_tweets from raw (no analysis filters; does not delete)
+        # Runs after a failed scrape too, so a dropped connection still gets a mirror sync.
+        # Analysis filters (bot / short / offtopic / dup_text) are applied in Colab, not here.
+        if: ${{ github.event.inputs.dry_run != 'true' && !cancelled() }}
         run: python clean.py --summary out/pipeline_summary.json
       - name: Keep a CSV copy of this run
         if: success()
