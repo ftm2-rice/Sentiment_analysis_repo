@@ -1,9 +1,9 @@
--- dc_tweets_raw: everything the scraper fetched, including the rows the rules
--- rejected. Same columns as dc_tweets plus:
---   drop_reason   NULL = scraper kept the row.
---                 The scraper writes NULL, retweet, or over_target.
---                 bot | short | offtopic | dup_text are Colab verdicts; older rows
---                 may still carry them (see filters.DROP_REASONS).
+-- dc_tweets_raw: everything the scraper fetched, including retweets.
+-- Same columns as dc_tweets plus:
+--   drop_reason   NULL = the scraper kept the row.
+--                 Values this repo writes: NULL | retweet | over_target.
+--                 Older rows may still say bot, short, offtopic, or dup_text.
+--                 Those labels are not assigned here; Colab filters them.
 --   found_via     'search' (keyword sweep) or 'thread' (expanded under an outlet post)
 --   thread_of     outlet handle whose thread the tweet was found in
 --   run_id        dc_runs.id of the run that fetched it
