@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-clean.py — re-apply the cleaning rules to everything ever fetched (dc_tweets_raw)
-and rebuild the clean table (dc_tweets) from it.
+clean.py — keep dc_tweets in step with what the scraper kept.
 
     python clean.py                     # Supabase → Supabase; writes out/pipeline_summary.json
-    python clean.py --dry-run           # compute and print the funnel, write nothing to Supabase
+    python clean.py --dry-run           # print counts, write nothing to Supabase
     python clean.py --csv raw.csv       # read a CSV export of dc_tweets_raw instead of Supabase
                                         # (what the notebook does); never writes to Supabase
 
-Why this exists: scrape.py applies the same rules while collecting (it has to,
-to decide which threads to expand and when its per-run target is reached), but
-it keeps the rejects in dc_tweets_raw with the rule that fired. That makes every
-rule re-runnable: change a regex in config.py, run clean.py, and the clean table
-follows. Nothing is re-fetched.
+The scraper collects (retweets and known ids only). The Colab notebook filters
+(bot, short, offtopic, dup_text) when it reads dc_tweets_raw.
+
+This script does not re-apply those Colab filters. dc_tweets mirrors scraper-kept
+rows: drop_reason NULL or over_target, retweets excluded. Historical rows that
+already say bot/short/offtopic/dup_text are left as stored — not promoted into
+dc_tweets, and not deleted if they are already there. Nothing else is deleted
+except a retweet that is still sitting in dc_tweets.
+
+apply_rules / funnel still reproduce the Colab funnel for the notebook. The
+daily job prints that funnel and does not write it back.
 
 Env vars (Supabase mode): SUPABASE_URL, SUPABASE_SERVICE_KEY
 """
@@ -29,7 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))      # so `import config` works from any folder
 import config as C  # noqa: E402
-from filters import CONTENT_REASONS, content_reason, classify, text_key  # noqa: E402
+from filters import (CONTENT_REASONS, ANALYSIS_REASONS, content_reason,  # noqa: E402
+                     classify, text_key)
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +100,10 @@ def tweet_dict(r: dict) -> dict:
 # The pipeline as a pure function: rows in → one verdict per row out
 # ---------------------------------------------------------------------------
 def apply_rules(rows: list[dict]) -> list[dict]:
-    """Return one verdict per row: {tweet_id, drop_reason, source_type, outlet_handle}.
-    Dedupe keeps the row that is currently clean (if any), else the earliest one."""
+    """Colab inspection verdict per row. The daily job does not write this back.
+
+    Dedupe keeps the row that is currently clean (if any), else the earliest one.
+    """
     outlets = {h.lower() for h in C.OUTLETS}                                            # the configured outlets…
     outlets |= {str(r["outlet_handle"]).lower() for r in rows if r.get("outlet_handle")}  # …plus auto-discovered ones
 
@@ -121,7 +129,7 @@ def apply_rules(rows: list[dict]) -> list[dict]:
 
 
 def funnel(rows: list[dict], verdicts: list[dict]) -> dict:
-    """Everything the notebook and the Streamlit app need to describe the pipeline, as one dict."""
+    """Colab analysis funnel for the notebook. Not what the daily job writes to dc_tweets."""
     by_reason = Counter(v["drop_reason"] or "kept" for v in verdicts)                   # how many per reason
     kept_ids = {v["tweet_id"] for v in verdicts if v["drop_reason"] is None}            # ids that passed
     by_type = Counter(v["source_type"] for v in verdicts if v["drop_reason"] is None)   # segments among kept
@@ -189,6 +197,33 @@ def _batched(sb, table: str, rows: list[dict], size: int = 50):
         sb.table(table).upsert(rows[i:i + size], on_conflict="tweet_id").execute()
 
 
+def mirror_verdicts(rows: list[dict]) -> list[dict]:
+    """One verdict per row for the dc_tweets mirror. Does not apply Colab filters.
+
+    Retweets stay out. NULL and over_target count as kept (over_target is reported
+    as None here so write_supabase copies the row into dc_tweets; the stored
+    over_target label is left alone when the other fields match). Historical
+    bot/short/offtopic/dup_text reasons are returned unchanged.
+    source_type is still refreshed with classify().
+    """
+    outlets = {h.lower() for h in C.OUTLETS}
+    outlets |= {str(r["outlet_handle"]).lower() for r in rows if r.get("outlet_handle")}
+    verdicts = []
+    for r in rows:
+        t = tweet_dict(r)
+        stored = r.get("drop_reason") or None
+        if t.get("retweeted_tweet") or stored == "retweet":
+            reason = "retweet"
+        elif stored in ANALYSIS_REASONS:
+            reason = stored                               # do not promote, do not clear
+        else:
+            reason = None                                 # NULL or over_target → in dc_tweets
+        st, oh = classify(t, outlets, thread_of=r.get("thread_of") or None)
+        verdicts.append({"tweet_id": r["tweet_id"], "drop_reason": reason,
+                         "source_type": st, "outlet_handle": oh})
+    return verdicts
+
+
 def write_supabase(sb, rows: list[dict], verdicts: list[dict]) -> dict:
     """Push the verdicts back. Compares against what the tables hold NOW, so it is safe to
     re-run after an interrupted attempt: only rows that differ are written."""
@@ -206,8 +241,9 @@ def write_supabase(sb, rows: list[dict], verdicts: list[dict]) -> dict:
             if in_clean.get(v["tweet_id"]) != (v["source_type"], v["outlet_handle"]):   # …and isn't, or differs
                 to_upsert.append({**{k: r.get(k) for k in CLEAN_COLS},
                                   **{k: v[k] for k in ("source_type", "outlet_handle")}})
-        elif v["tweet_id"] in in_clean:                     # should NOT be in dc_tweets, but is
-            to_delete.append(v["tweet_id"])
+        elif v["drop_reason"] == "retweet" and v["tweet_id"] in in_clean:
+            to_delete.append(v["tweet_id"])                 # retweets stay out of dc_tweets
+        # bot/short/offtopic/dup_text: leave the row where it is. Do not delete it.
 
     _batched(sb, C.SUPABASE_RAW_TABLE, changed_raw)
     _batched(sb, C.SUPABASE_TABLE, to_upsert)
@@ -234,18 +270,23 @@ def main():
         rows = load_raw_supabase(sb)
     print(f"{len(rows)} rows in {C.SUPABASE_RAW_TABLE}")
 
-    # 2. judge
-    verdicts = apply_rules(rows)
-    summary = funnel(rows, verdicts)
+    # 2. Colab funnel is printed for inspection only. It is not written back.
+    inspection = apply_rules(rows)
+    summary = funnel(rows, inspection)
+    summary["pipeline"] = "scraper collects (cost-saving gates only); Colab filters"
+    summary["note"] = (
+        "The funnel above is the Colab inspection (apply_rules). It is not written to "
+        "dc_tweets. The mirror is scraper-kept rows: drop_reason null or over_target, "
+        "retweets excluded. Historical bot/short/offtopic/dup_text rows are left as stored."
+    )
+    print("Colab inspection only (not written to dc_tweets):")
     for s in summary["funnel"]:
         print(f"  {s['step']:<28} {s.get('dropped', ''):>6}  → {s['remaining']}")
-    print(f"clean by segment: {summary['clean_by_source_type']}")
 
-    # 3. compare with what the scraper decided at collection time
-    stored = Counter((r.get("drop_reason") or "kept") if r.get("drop_reason") != "over_target" else "kept" for r in rows)
-    diff = {k: summary["dropped_by_reason"].get(k, 0) - stored.get(k, 0)
-            for k in set(stored) | set(summary["dropped_by_reason"]) if summary["dropped_by_reason"].get(k, 0) != stored.get(k, 0)}
-    print(f"change vs. stored verdicts: {diff or 'none'}")
+    # 3. what dc_tweets should hold
+    verdicts = mirror_verdicts(rows)
+    summary["n_mirror"] = sum(1 for v in verdicts if v["drop_reason"] is None)
+    print(f"dc_tweets mirror: {summary['n_mirror']} scraper-kept rows")
 
     # 4. write the summary JSON (the notebook and the Streamlit app read this)
     Path(args.summary).parent.mkdir(parents=True, exist_ok=True)
@@ -264,7 +305,7 @@ def main():
                     w.writerow({**by_id[v["tweet_id"]], **v})
         print(f"wrote {args.out_clean}")
 
-    # 6. write back to Supabase (unless --csv or --dry-run)
+    # 6. write the mirror back (unless --csv or --dry-run). Does not re-apply Colab filters.
     if sb is not None and not args.dry_run:
         print(write_supabase(sb, rows, verdicts))
 

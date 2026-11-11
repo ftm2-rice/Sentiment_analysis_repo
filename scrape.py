@@ -3,18 +3,22 @@
 scrape.py — collect public tweets about data centers in Argentina and store them
 in Supabase.
 
-    python scrape.py --mode daily                 # cron: last 48 h + history until 1,000 clean rows
+    python scrape.py --mode daily                 # cron: last 48 h + history until 1,000 new stored rows
     python scrape.py --mode backfill              # one-off deep sweep
     python scrape.py --mode test                  # smoke test, ≤100 tweets fetched (≈ $0.015)
     python scrape.py --mode daily --dry-run --csv out/x.csv   # fetch, don't write, dump the raw CSV
-    python clean.py                               # re-apply the rules from dc_tweets_raw → dc_tweets
+    python clean.py                               # mirror scraper-kept rows from dc_tweets_raw → dc_tweets
 
-Two passes:
+The scraper collects. The Colab notebook filters (bot, short, offtopic, dup_text).
+
+Two passes, unchanged:
     1. keyword sweep   — the queries in config.py, by time window
     2. thread expansion — replies under on-topic outlet posts found in pass 1
+       (is_on_topic here only chooses which posts to expand; it does not drop tweets)
 
-Every fetched tweet ends up in dc_tweets_raw with a drop_reason (NULL = kept).
-The kept ones also go to dc_tweets. The rules themselves live in filters.py.
+Every fetched tweet ends up in dc_tweets_raw. Retweets get drop_reason "retweet".
+Everything else is kept (drop_reason NULL, or "over_target" past the cap) and also
+written to dc_tweets. Known ids already in dc_tweets are skipped.
 
 Env vars:  TWITTERAPI_IO_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY
 """
@@ -33,8 +37,8 @@ import requests                             # HTTP calls to the API
 
 sys.path.insert(0, str(Path(__file__).parent))      # so `import config` works from any folder
 import config as C  # noqa: E402
-from filters import (parse_dt, text_key, author_is_verified, is_on_topic,  # noqa: E402
-                     tweet_topic_text, content_reason, classify, to_row)
+from filters import (parse_dt, author_is_verified, is_on_topic,  # noqa: E402
+                     tweet_topic_text, collection_reason, classify, to_row)
 
 API = "https://api.twitterapi.io/twitter/tweet/advanced_search"   # the search endpoint
 COST_PER_TWEET = 0.00015  # $0.15 per 1,000 tweets returned
@@ -248,28 +252,28 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     # ---- State for this run -------------------------------------------------
     seen: dict[str, dict] = {}        # tweet_id → tweet, for the ones we keep
     seen_query: dict[str, str] = {}   # tweet_id → the query that found it
-    seen_text: set[str] = set()       # normalised texts kept so far (dedupe)
     seen_thread: dict[str, str] = {}  # tweet_id → outlet handle, for tweets found by thread expansion
-    rejected: list[tuple[dict, str, str, str | None]] = []   # (tweet, reason, query, thread_of) — kept for the raw table
-    dropped = {"retweet": 0, "bot": 0, "short": 0, "offtopic": 0, "dup_text": 0, "known": 0}   # counters
+    rejected: list[tuple[dict, str, str, str | None]] = []   # (tweet, reason, query, thread_of) — retweets, for the raw table
+    dropped = {"retweet": 0, "known": 0}   # bot/short/offtopic/dup_text are not counted: Colab applies those
 
-    def consider(t: dict, query: str, thread_reply: bool = False, thread_of: str | None = None) -> bool:
-        """Judge one fetched tweet. Returns True if kept. Rejects are remembered with
-        their reason so the raw table shows what was fetched, not only what survived."""
+    def consider(t: dict, query: str, thread_of: str | None = None) -> bool:
+        """Record one fetched tweet. Returns True if it is stored as a keeper.
+
+        Drops only retweets and ids already in dc_tweets. Bot, short text, off-topic
+        and duplicate text are not dropped — the Colab notebook applies those to
+        dc_tweets_raw.
+        """
         tid = str(t.get("id") or "")
         if not tid or tid in seen:
             return False                            # no id, or already kept in this run
         if tid in known:
             dropped["known"] += 1                   # already in dc_tweets from an earlier run: nothing new
             return False
-        reason = content_reason(t, outlets, thread_reply)          # rules 1–2 (filters.py)
-        if reason is None and text_key(t) in seen_text:            # dedupe: same text as a kept tweet
-            reason = "dup_text"
+        reason = collection_reason(t)               # retweet, or None (filters.py)
         if reason:
             dropped[reason] += 1
-            rejected.append((t, reason, query, thread_of))         # keep the reject
+            rejected.append((t, reason, query, thread_of))         # keep the retweet in the raw table
             return False
-        seen_text.add(text_key(t))
         if thread_of:
             seen_thread[tid] = thread_of            # remember which outlet's thread it came from
         seen[tid] = t
@@ -282,7 +286,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
     news_posts: dict[str, dict] = {}                # outlet posts whose threads we'll expand in pass 2
     covered = load_coverage(sb) if hist else set()  # ledger of cells already swept
     skipped = 0
-    target = P["target_new_tweets"]                 # clean rows wanted this run
+    target = P["target_new_tweets"]                 # new stored rows (non-retweets), not a post-filter count
     sweep_target = int(target * 0.7)                # pass 1 stops at 70 %; the rest is for thread replies
 
     def enough(limit: int = target) -> bool:
@@ -355,7 +359,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
         un = (t.get("author") or {}).get("userName") or ""
         q = f"conversation_id:{cid} -from:{un} -filter:nativeretweets"   # replies in the thread, not the outlet's own
         got = sum(1 for r in client.search(q, "Latest", P["max_thread_pages"])
-                  if consider(r, q, thread_reply=True, thread_of=un.lower()))   # thread replies skip the topic check
+                  if consider(r, q, thread_of=un.lower()))   # stored like any other non-retweet
         print(f"  thread @{un} ({t.get('replyCount')} replies) → {got} kept")
 
     # ---- Classify, trim, build the rows --------------------------------------
@@ -364,7 +368,7 @@ def run(mode: str, dry_run: bool, out_csv: str | None):
         st, oh = classify(t, outlets, thread_of=seen_thread.get(tid))   # rule 3: segment
         rows.append(to_row(t, st, oh, seen_query[tid], mode))
     rows.sort(key=lambda r: r["created_at"], reverse=True)              # newest first
-    kept, over = rows[:P["target_new_tweets"]], rows[P["target_new_tweets"]:]   # cap at the target
+    kept, over = rows[:P["target_new_tweets"]], rows[P["target_new_tweets"]:]   # cap counts stored rows
 
     # The raw table = everything fetched this run: survivors with drop_reason NULL,
     # rows beyond the cap as "over_target", rejects with the rule that fired.

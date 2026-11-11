@@ -1,6 +1,6 @@
 # Audience & Data Filtering Strategy (`config.py`)
 
-This document outlines the filtering parameters, audience categorization, and noise-reduction rules applied during our Twitter/X data collection pipeline.
+The scraper **collects** (search query, known-id skip, retweet exclusion, budget cap). The Colab notebook **filters**. Bot, short-text, off-topic and duplicate-text rules below are Colab rules. They are not applied by `scrape.py`. `is_on_topic` is also used by the scraper only to choose which outlet posts are worth expanding into threads.
 
 ---
 
@@ -40,9 +40,9 @@ We categorize preserved tweets into six target audience segments:
 
 ---
 
-## 3. Exclusion Rules (What We Leave)
+## 3. Exclusion Rules (What Colab Sets Aside)
 
-To maintain high data quality and remove noise, tweets meeting any of the following criteria are dropped immediately:
+The scraper still drops plain retweets (`-filter:nativeretweets`, and `retweeted_tweet` in code) and skips ids already in `dc_tweets`. Everything else is stored. The Colab notebook then sets aside tweets that match the rules below:
 
 ### A. False Positives & Irrelevant Context
 * **Commodity / Comparison References (`ARGENTINA_FALSE_RE`):**
@@ -53,7 +53,7 @@ To maintain high data quality and remove noise, tweets meeting any of the follow
   * Generic political chatter mentioning Milei, Caputo, or US Stargate without explicit data center context.
 
 ### B. Structural & Bot/Spam Filters (`BOT_RULES`)
-* **Native Retweets:** Plain retweets (`-filter:nativeretweets`) are excluded to prioritize original opinions and direct discussions.
+* **Native Retweets:** Removed by the scraper (`-filter:nativeretweets`, plus any `retweeted_tweet` the API still returns). Not a Colab filter.
 * **X Automated Flag:** Dropped if the account carries X's official "Automated" label.
 * **Spam Username Patterns:** Handles matching bot patterns (e.g., containing `bot`, `_ia`, `_ai`, `ainew`, `noticias24`, `digest`, `summary`).
 * **High Frequency Accounts:** Accounts posting $>150$ tweets per day over their lifetime.
