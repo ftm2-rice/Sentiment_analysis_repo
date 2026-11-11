@@ -1,19 +1,15 @@
 """
 filters.py — shared rules, as functions.
 
-The numbers and regexes live in config.py. Two different callers use this file:
+The numbers and regexes live in config.py.
 
-  * scrape.py  — collection only. It drops a retweet and, once the run has
-                 stored target_new_tweets new rows, labels the rest
-                 over_target. See collection_reason. It does NOT drop bots,
-                 short texts, off-topic posts or duplicate texts.
-  * the Colab notebook (and clean.apply_rules, for inspection) — analysis.
-                 A tweet is judged in this order (see content_reason):
+  * scrape.py uses collection_reason. The only content drop at collection time
+    is a retweet. Bot, short text, off-topic and duplicate text are not applied.
+  * The Colab notebook (and clean.apply_rules, for inspection) uses content_reason.
+    Order: retweet → bot → short → offtopic → (dup_text, done by the caller).
 
-                     retweet → bot → short → offtopic → (dup_text, by the caller)
-
-is_on_topic is also a cost gate inside scrape.py: only an on-topic outlet post
-is expanded into a thread. That does not drop the tweet from dc_tweets_raw.
+is_on_topic is also the scraper's cost gate for which outlet posts get their
+threads expanded. That does not drop the tweet.
 """
 from __future__ import annotations          # lets us write `str | None` on Python < 3.10
 
@@ -24,16 +20,13 @@ from email.utils import parsedate_to_datetime   # parses X's date format ("Tue S
 import config as C                          # all thresholds and regexes; referenced as C.SOMETHING
 
 # Every value dc_tweets_raw.drop_reason can hold.
-# The scraper writes only: NULL (kept), "retweet", "over_target".
-# "bot", "short", "offtopic" and "dup_text" are analysis verdicts. Old rows may
-# still carry them; the Colab notebook recomputes them from the raw fields.
+# The scraper writes NULL, "retweet", or "over_target".
+# bot / short / offtopic / dup_text are Colab verdicts. Older rows may still store them.
 DROP_REASONS = ["retweet", "bot", "short", "offtopic", "dup_text", "over_target"]
-# Analysis order used by content_reason / the Colab notebook. Not applied by scrape.py.
+# Colab order (content_reason). Not applied by scrape.py.
 # "over_target" only means the scraper's per-run cap was reached; it is not a quality verdict.
 CONTENT_REASONS = ["retweet", "bot", "short", "offtopic", "dup_text"]
-# Rows with these stored reasons stay out of dc_tweets unless someone opts in
-# (clean.py --promote-historical). New scrapes do not assign them.
-ANALYSIS_REASONS = ["bot", "short", "offtopic", "dup_text"]
+ANALYSIS_REASONS = ["bot", "short", "offtopic", "dup_text"]   # Colab-only; left as stored by clean.py
 
 
 # ---------------------------------------------------------------------------
@@ -140,30 +133,25 @@ def tweet_topic_text(t: dict) -> str:
 # ---------------------------------------------------------------------------
 # All content rules in one call
 # ---------------------------------------------------------------------------
-def collection_reason(t: dict, n_stored: int, target: int) -> str | None:
-    """drop_reason written by the scraper, or None if the row is a normal keep.
+def collection_reason(t: dict) -> str | None:
+    """Content drop applied by the scraper, or None if the tweet is stored.
 
-    Cost-saving gates only. Bot / short / off-topic / duplicate text are NOT
-    decided here — the Colab notebook applies those when it reads dc_tweets_raw.
-    n_stored: new non-retweet rows already accepted in this run.
-    target:   config target_new_tweets. Rows past it are still stored (we already
-              paid for them) but labelled over_target, and the run stops fetching.
+    Only a plain retweet is dropped. Bot, short, off-topic and duplicate text
+    are Colab filters — see content_reason. The per-run cap (over_target) is
+    applied by scrape.py after this, and it counts stored rows.
     """
     if t.get("retweeted_tweet"):
         return "retweet"                                    # a plain RT: someone else's words
-    if n_stored >= target:
-        return "over_target"                                # cap reached; row is kept, labelled
     return None
 
 
 def content_reason(t: dict, outlets: set[str], thread_reply: bool = False) -> str | None:
-    """Analysis verdict for the Colab notebook, or None if the tweet passes.
+    """Colab analysis verdict, or None if the tweet passes. The scraper does not call this.
 
-    The scraper does not call this to drop rows. clean.apply_rules still does,
-    so the notebook can show the funnel. outlets: lowercase handles treated as
-    news outlets (they get the lenient topic check). thread_reply: found by
-    expanding an on-topic outlet thread; those replies skip the off-topic rule.
-    Dedupe is NOT done here: the caller holds the set of texts already kept.
+    outlets:      lowercase handles treated as news outlets (they get the lenient topic check)
+    thread_reply: the tweet was found by expanding an on-topic outlet thread; such replies
+                  don't have to repeat the keywords, so the off-topic rule is skipped.
+    Dedupe is NOT done here: it needs the set of texts already kept, which the caller holds.
     """
     if t.get("retweeted_tweet"):
         return "retweet"                                    # a plain RT: someone else's words

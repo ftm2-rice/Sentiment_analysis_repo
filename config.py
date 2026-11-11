@@ -24,11 +24,11 @@ ARGENTINA_ANCHORS = (
 # pulled in the US Stargate (Abilene, New Mexico) and Milei pulled in jokes.
 
 # ---------------------------------------------------------------------------
-# Topic check used by the Colab notebook (analysis), and by the scraper only
-# as a cost gate: which outlet posts are worth expanding into threads.
-# The scraper does NOT drop a tweet for failing this check.
+# Topic check for the Colab notebook, and for the scraper only as a cost gate:
+# which outlet posts are worth expanding into threads. The scraper does NOT
+# drop a tweet for failing this check.
 #
-# X search matches anywhere in a long post, so a 2,000-char digest that says
+# X search matches anywhere in a long post, so a 2,000-char digest mentioning
 # "data centers" once and "Argentina" once elsewhere gets through the query.
 # For the Colab filter, a tweet passes only if a data-center term and an
 # Argentina term both appear, and for long texts they must sit within
@@ -122,9 +122,8 @@ SOURCE_TYPES = {
 OPINION_TYPES = [k for k in SOURCE_TYPES if k != "outlet_post"]   # what sentiment is scored on
 
 # ---------------------------------------------------------------------------
-# Bot / spam / length rules. Applied by the Colab notebook that reads
-# dc_tweets_raw, NOT by scrape.py. Kept here so that notebook imports one
-# definition. min_text_chars is the "short" rule; the rest feed is_bot().
+# Bot / spam / length rules for the Colab notebook that reads dc_tweets_raw.
+# Not applied by scrape.py. min_text_chars is the "short" rule; the rest feed is_bot().
 # ---------------------------------------------------------------------------
 BOT_RULES = {
     "drop_if_automated_flag": True,          # X's own "Automated" label
@@ -143,22 +142,16 @@ HISTORY_START = "2024-12-01"
 WINDOW_DAYS = 7          # ISO weeks (Monday 00:00 UTC → next Monday)
 
 DAILY = {
-    # Phase 1: tweets newer than the last finished run, with a small overlap.
-    # 26 h covers the 24 h cron plus a couple of hours of slack. If the last
-    # run recorded a watermark, the window starts just before that instead,
-    # and widens (up to max_catchup_hours) when a run was missed.
-    "lookback_hours": 26,
-    "fresh_overlap_hours": 2,
-    "max_catchup_hours": 24 * 14,
-    "fresh_pages_per_query": 2,         # a normal day is ~1 page; 2 is the cap
-    # Phase 2 is off. History through the coverage ledger is already collected;
-    # `python scrape.py --mode backfill` walks it again. The current ISO week
-    # is still swept once, and pagination stops when a page is all known ids.
-    "backfill_history": False,
-    "start_date": HISTORY_START,        # used only if backfill_history is flipped on
-    "max_pages_per_query_window": 4,    # 80 tweets per query per week (backfill / catch-up)
-    "target_new_tweets": 1000,          # NEW rows stored this run (no analysis filter).
-                                        # Stops further API calls. A normal day is far below this.
+    # Phase 1: everything new in the last 48 h (overlap on purpose; known ids handle it)
+    "lookback_hours": 48,
+    "fresh_pages_per_query": 2,         # 48 h never yields more than ~40 per query
+    # Phase 2: walk backwards one ISO week at a time (coverage ledger skips
+    # weeks already done) until target_new_tweets new stored rows are collected.
+    "start_date": HISTORY_START,
+    "max_pages_per_query_window": 4,    # 80 tweets per query per week
+    "target_new_tweets": 1000,          # NEW stored rows (non-retweets). Not a Colab-filter count.
+                                        # Once dc_tweets has ~4,000 rows, drop this to 200:
+                                        # the cron then just keeps the dataset current.
     "max_thread_pages": 3,
     "max_threads": 40,
     "hard_cap_tweets_fetched": 2500,    # ≈ 37.5k credits ≈ $0.375 worst case per run
@@ -201,7 +194,7 @@ BONUS = {
 
 MODES = {"backfill": BACKFILL, "daily": DAILY, "test": TEST, "bonus": BONUS}
 
-SUPABASE_TABLE = "dc_tweets"              # scraper-kept rows (raw minus retweets); Streamlit reads this
-SUPABASE_RAW_TABLE = "dc_tweets_raw"      # everything fetched; Colab applies analysis filters
+SUPABASE_TABLE = "dc_tweets"              # scraper-kept rows (raw minus retweets); Streamlit's snapshot is built from this
+SUPABASE_RAW_TABLE = "dc_tweets_raw"      # everything fetched; Colab applies bot/short/offtopic/dup_text
 SUPABASE_RUNS_TABLE = "dc_runs"
 SUPABASE_COVERAGE_TABLE = "dc_coverage"
